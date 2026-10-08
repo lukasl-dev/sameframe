@@ -14,25 +14,45 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Error, Message, client::IntoClientRequest},
 };
-use topcoat::router::{Router, RouterBuilderDiscoverExt};
+use topcoat::router::{BodyLimit, OriginPolicy, Router, RouterBuilderDiscoverExt};
 
-use crate::{api::ConnectionLimits, rooms::Rooms};
+use crate::{
+    BrowserPolicy,
+    access::{Access, AccessGate},
+    api::ConnectionLimits,
+    rooms::Rooms,
+};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct TestServer {
     address: SocketAddr,
     rooms: Rooms,
+    cookie: Option<String>,
     task: JoinHandle<()>,
     _shutdown: oneshot::Sender<()>,
 }
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_access(Access::for_test("a".repeat(64)), false).await
+    }
+
+    async fn start_with_access(access: Access, public: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let rooms = Rooms::new();
+        let cookie = if public {
+            None
+        } else {
+            Some(access.test_cookie())
+        };
         let router = Router::builder()
+            .app_context(access)
+            .origin_policy(OriginPolicy::dangerous_disable())
+            .layer(BodyLimit::max(1024))
+            .layer(AccessGate)
+            .layer(BrowserPolicy)
             .app_context(rooms.clone())
             .app_context(ConnectionLimits::new())
             .discover()
@@ -49,6 +69,7 @@ impl TestServer {
         Self {
             address,
             rooms,
+            cookie,
             task,
             _shutdown: shutdown,
         }
@@ -62,6 +83,11 @@ impl TestServer {
             "origin",
             format!("http://{}", self.address).parse().unwrap(),
         );
+        if let Some(cookie) = &self.cookie {
+            request
+                .headers_mut()
+                .insert("cookie", cookie.parse().unwrap());
+        }
         let (socket, _) = connect_async(request).await.unwrap();
         socket
     }
@@ -118,6 +144,29 @@ async fn ack(socket: &mut Socket, id: &str) -> Value {
         message["type"] == "ack" && message["id"] == id
     })
     .await
+}
+
+#[tokio::test]
+async fn public_websockets_need_no_site_key_but_guests_still_cannot_control_playback() {
+    let server = TestServer::start_with_access(Access::public(), true).await;
+    let created = server.rooms.create().unwrap();
+    let mut guest = server.connect(&created.room_id).await;
+
+    let welcome = join(&mut guest, None).await;
+    assert_eq!(welcome["role"], "guest");
+
+    command(
+        &mut guest,
+        "forbidden",
+        0,
+        json!({"type":"set_video", "video_id":"dQw4w9WgXcQ"}),
+    )
+    .await;
+    let error = receive(&mut guest, |message| {
+        message["type"] == "error" && message["id"] == "forbidden"
+    })
+    .await;
+    assert_eq!(error["code"], "forbidden");
 }
 
 #[tokio::test]
@@ -639,10 +688,43 @@ async fn cross_origin_socket_upgrade_is_rejected() {
     request
         .headers_mut()
         .insert("origin", "https://hostile.example".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("cookie", server.cookie.as_ref().unwrap().parse().unwrap());
 
     assert!(
         matches!(connect_async(request).await, Err(Error::Http(response)) if response.status() == 403)
     );
+}
+
+#[tokio::test]
+async fn raw_upgrades_without_cookie_are_rejected_before_room_lookup_even_with_url_token() {
+    let server = TestServer::start().await;
+    let created = server.rooms.create().unwrap();
+    for room in [created.room_id.as_str(), "missing"] {
+        for query in [String::new(), format!("?access_token={}", "a".repeat(64))] {
+            let mut request = format!("ws://{}/api/rooms/{room}/ws{query}", server.address)
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                "origin",
+                format!("http://{}", server.address).parse().unwrap(),
+            );
+            let Err(Error::Http(response)) = connect_async(request).await else {
+                panic!("locked websocket must not upgrade");
+            };
+            assert_eq!(response.status(), 401);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let body = response.body().as_ref().unwrap();
+            let failure: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(failure["code"], "access_required");
+            assert!(!String::from_utf8_lossy(body).contains(&"a".repeat(64)));
+        }
+    }
+    // Site admission does not grant any room or host authority.
+    let mut guest = server.connect(&created.room_id).await;
+    assert_eq!(join(&mut guest, None).await["role"], "guest");
+    guest.close(None).await.unwrap();
 }
 
 #[tokio::test]

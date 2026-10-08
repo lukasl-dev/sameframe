@@ -403,7 +403,7 @@ fn json_response(status: StatusCode, value: &impl Serialize) -> Result<Response>
 }
 
 /// Compare authorities, not suffixes; a hostile lookalike host is never same-origin.
-fn same_origin(headers: &HeaderMap, required: bool) -> bool {
+pub(crate) fn same_origin(headers: &HeaderMap, required: bool) -> bool {
     let Some(origin) = headers.get("origin") else {
         return !required;
     };

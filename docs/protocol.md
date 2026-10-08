@@ -4,7 +4,56 @@ Rooms are ephemeral; hosts and host-appointed moderators control playback. Guest
 follow the room; a stalled guest
 never pauses the room. All browser traffic is same-origin. No accounts or DB.
 
-## HTTP
+## Site admission
+
+Site admission is enabled by default; `--public` explicitly disables it without
+loading or generating a token file. Private mode uses `./access-token`, or the path
+given by `--access-token-file PATH` (relative to the working directory). Public mode
+still enforces same-origin requests and room host/moderator permissions; it does
+not process access-token links and `POST /api/access` returns 404 without a cookie.
+
+The persistent shared site key is separate from every room's host token. Global
+cookie gating applies before room lookup, body extraction or WebSocket upgrade,
+including unmatched paths. Locked GET document requests return a generic cosy
+401 lock page, not room/unavailable information; HEAD returns an empty 401.
+Protected APIs, runtime paths, upgrades and mutations instead return 401 JSON:
+`{"code":"access_required","message":"Enter the site access token to continue."}`.
+Responses are no-store and vary by Cookie. Lock pages and every response to an
+`access_token` query use `Referrer-Policy: no-referrer`.
+
+Only `POST /api/access` and canonical GET/HEAD `/_topcoat/assets/` files are public.
+Other `/_topcoat/` runtime/dev/procedure routes are not exempt. Static code
+contains no credentials. The global gate implements origin checks after cookie
+admission (rather than Topcoat's outer default policy), ensuring even a hostile
+unauthenticated upgrade returns 401. Authenticated mutations reject cross-site
+fetch metadata and mismatched Origin authorities; WebSockets require Origin.
+Direct non-browser mutations without Origin retain the existing behaviour.
+
+`POST /api/access` requires `Content-Type: application/json`, exactly one
+same-origin Origin and Host, and strict JSON `{ "token": "64 lowercase hex characters" }`
+with no unknown or duplicate fields and a 1024-byte body cap. Wrong keys, malformed
+payloads and bad origins return generic 403 JSON; oversized bodies return 413.
+Bounded one-minute windows permit 12 attempts per peer and 120 globally; excess
+returns 429. Behind a proxy, callers may share one peer budget. No response echoes
+a key. Fixed-length key and cookie checks are constant-time.
+
+Success returns 204 and `sameframe_access=<domain-separated SHA256 digest>` with
+`Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`, plus Secure unless Host is
+localhost/127.0.0.1/[::1]. Forwarded headers do not control this decision. Duplicate
+site cookies fail closed. Protected `GET /api/access` returns 204 only with an
+accepted cookie, without consuming an unlock attempt; the browser uses it to
+verify cookie persistence before remembering a key and reloading.
+
+A document URL containing a decoded `access_token` query key always gets the lock
+page, even with an authenticated cookie. The browser strips all copies immediately,
+preserves other query parameters and the room's host fragment, POSTs the explicit
+key, and stores it in localStorage only after successful cookie verification.
+A remembered key can restore a missing cookie; invalid keys are cleared. URL
+keys alone **never** authorise room creation, APIs or upgrades. Use HTTPS publicly;
+proxy query logging/history remains a risk despite stripping and no-referrer.
+Room invites stay site-key-free; share site admission separately.
+
+## HTTP (after site admission)
 
 - `POST /api/rooms`, no body → 201 JSON `{ "room_id": "...", "host_token": "..." }`.
 - `GET /room/{room_id}` → room page; unknown/expired room has a friendly unavailable page.

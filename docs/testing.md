@@ -6,6 +6,41 @@ Clippy, and formatting. These are deterministic and do not depend on YouTube.
 The client harness models delayed iframe getters and setter callbacks. A passing
 harness is not a substitute for testing YouTube's real iframe API.
 
+## Site access coverage
+
+Backend tests use `Access::for_test` and a synthetic 64-character lowercase hex
+key, never production token files. HTTP coverage checks lock pages on every
+path (including unmatched routes), HEAD, encoded/repeated query keys with and
+without a cookie, no-referrer/no-store/Vary Cookie headers, strict bounded unlock
+JSON, origin checks, one-year cookie flags, public Host security behind an HTTP
+proxy, cookie probe, duplicate-cookie rejection, bounded/reusable attempt windows,
+static-only public paths and traversal/method bypass attempts. Real socket tests
+attempt raw unauthorised upgrades for existing/missing rooms with a URL key and
+verify 401 JSON before upgrade; authenticated site guests still lack host powers.
+Temporary-directory startup tests check 0600 files, newly created 0700 parents,
+reload persistence, simultaneous starts, rotation and fail-closed handling of
+malformed/unreadable/insecure files. Locked HTML and generic errors must not
+contain even the known synthetic key.
+
+For browser checks run a separate loopback server with
+`--access-token-file` pointing to a temporary **0600** file containing a
+synthetic key. Do not capture or print the actual development/service key.
+Check wrong/manual key, URL-key stripping before requests, host-fragment
+preservation, remembered-key restoration after clearing cookies, wrong-key
+precedence over an existing cookie, blocked localStorage, blocked cookies (no
+reload loop), generic unknown-room lock page, and 320px mobile layout. Inspect
+network requests: only gate CSS/JS may load before admission; no room scripts or
+YouTube embeds. Use two browser sessions admitted separately for room-role tests.
+
+CLI tests check private-by-default behaviour, custom paths, explicit `--public`,
+missing values, conflicting options and unknown arguments. Public-mode HTTP and
+real socket tests check that visitors need no site cookie but same-origin checks
+and room permissions remain enforced. Run `sameframe --public` in an empty temporary
+working directory and verify that no token file is created; `--help` must also exit
+without generating one. For systemd-style persistence, run from a temporary state
+directory without CLI options and verify `access-token` is generated directly there
+at mode 0600, then remains identical across a restart.
+
 ## Backend social/activity coverage
 
 `cargo test` exercises the room actor and real WebSocket upgrades. Coverage includes:
@@ -36,7 +71,7 @@ never create a banner; routine notices occupy the fixed-height player caption.
 Use two independent browser sessions so the guest does not inherit the host's
 session storage. Check desktop and a narrow mobile viewport.
 
-1. Create a room. Its address must immediately become the clean guest invite
+1. Unlock the site independently in both sessions, then create a room. Its address must immediately become the clean guest invite
    URL; it must not contain a host token or query parameters.
 2. Copy the link. The ghost icon briefly becomes a checkmark. Player position,
    document height, and visible notices must not change. With clipboard access

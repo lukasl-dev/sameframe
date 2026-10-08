@@ -377,6 +377,145 @@ pub(crate) async fn home() -> Result<impl View> {
     })
 }
 
+/// The access layer renders this instead of any private page until unlocked.
+#[component]
+pub(crate) async fn access_gate() -> Result<impl View> {
+    Ok(view! {
+        <!DOCTYPE html>
+        <html lang="en" class="dark">
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <meta name="color-scheme" content="dark">
+                <meta name="theme-color" content="#1e1e2e">
+                <meta name="referrer" content="no-referrer">
+                <title>"Come on in — Sameframe"</title>
+                <link rel="stylesheet" href=(topcoat::tailwind::stylesheet!())>
+                <script type="module" src=(asset!("assets/access.js"))></script>
+            </head>
+            <body>
+                <a class="skip-link" href="#main">"Skip to content"</a>
+                header()
+                <main
+                    id="main"
+                    class="mx-auto grid w-[calc(100%-32px)] max-w-[820px] flex-1 content-center gap-7 py-8 sm:w-[calc(100%-48px)] sm:py-12 min-[800px]:grid-cols-[minmax(0,1fr)_340px] min-[800px]:items-center min-[800px]:gap-10"
+                >
+                    <section class="min-w-0" aria-labelledby="access-title">
+                        <p class="mb-4 text-[11px] tracking-[.16em] text-[#fab387]/80">
+                            "A LITTLE SPACE, JUST FOR US"
+                        </p>
+                        <h1
+                            id="access-title"
+                            class="text-[clamp(2rem,5vw,3rem)] font-medium leading-[1.12]"
+                        >
+                            "There’s a seat for you."
+                        </h1>
+                        <p
+                            class="mt-4 max-w-[350px] text-sm leading-relaxed text-muted-foreground"
+                        >
+                            "We keep this viewing nook private. Bring the access token from your invite, and make yourself at home."
+                        </p>
+                        <div class="mt-6 hidden min-[800px]:block">
+                            viewing_nook(quiet: true)
+                        </div>
+                    </section>
+                    <section
+                        class="min-w-0 rounded-[20px] border border-border bg-card p-5 shadow-sm sm:p-6"
+                        aria-labelledby="unlock-title"
+                    >
+                        <span
+                            class="mb-4 inline-flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary"
+                            aria-hidden="true"
+                        >
+                            <svg class="size-5" viewBox="0 0 24 24" fill="none">
+                                <path
+                                    d="M8 10V7a4 4 0 0 1 8 0v3M6 10h12v10H6V10Zm6 4v2"
+                                    stroke="currentColor"
+                                    stroke-width="1.5"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                ></path>
+                            </svg>
+                        </span>
+                        <h2 id="unlock-title" class="text-lg font-medium">
+                            "Come on in"
+                        </h2>
+                        <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
+                            "One key to the nook. No account needed."
+                        </p>
+                        <form id="access-form" class="mt-6">
+                            <label for="access-token" class="mb-2 text-xs font-medium">
+                                "Your access token"
+                            </label>
+                            <div class="relative">
+                                <input
+                                    id="access-token"
+                                    class="border-border bg-background px-3 py-2 pr-16 sm:text-sm"
+                                    name="token"
+                                    type="password"
+                                    maxlength="64"
+                                    required=(true)
+                                    autocomplete="off"
+                                    autocapitalize="none"
+                                    spellcheck="false"
+                                    placeholder="Paste your key here"
+                                    aria-describedby="access-help access-error"
+                                    disabled=(true)
+                                >
+                                <button
+                                    id="access-visibility"
+                                    class="absolute inset-y-0 right-1 min-w-12 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                                    type="button"
+                                    aria-controls="access-token"
+                                    aria-pressed="false"
+                                    disabled=(true)
+                                >
+                                    "Show"
+                                </button>
+                            </div>
+                            button(
+                                attrs: attributes! {
+                                    id="unlock-access"
+                                    class="mt-3 h-11 w-full"
+                                    type="submit"
+                                    disabled=(true)
+                                },
+                                "Unlock the nook"
+                            )
+                        </form>
+                        <p
+                            id="access-status"
+                            class="mt-3 text-xs text-muted-foreground"
+                            role="status"
+                            aria-live="polite"
+                        >
+                            "Getting the door ready…"
+                        </p>
+                        <p
+                            id="access-error"
+                            class="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive"
+                            role="alert"
+                            hidden=(true)
+                        ></p>
+                        <p
+                            id="access-help"
+                            class="mt-4 text-[11px] leading-relaxed text-muted-foreground"
+                        >
+                            "We’ll remember access on this browser. Keep the key between your people."
+                        </p>
+                        <noscript>
+                            <p class="mt-4 text-xs text-destructive">
+                                "Enable JavaScript to unlock this private nook."
+                            </p>
+                        </noscript>
+                    </section>
+                </main>
+                footer()
+            </body>
+        </html>
+    })
+}
+
 #[page("/room/{room_id}")]
 pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
     let room_id = path_param::<RoomId>(cx);

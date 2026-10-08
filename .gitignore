@@ -28,3 +28,8 @@ rustc-ice-*.txt
 result
 result-*
 .playwright-mcp/
+
+# Persistent private site admission token
+/access-token
+# Keep the previous development location ignored too.
+.sameframe/

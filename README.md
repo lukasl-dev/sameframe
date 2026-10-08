@@ -22,6 +22,59 @@ cannot restore host access. Room state is held in memory and disappears on a
 server restart. Empty rooms expire after 30 minutes, including rooms that were
 created but never joined.
 
+## Private site access
+
+Every page, API and WebSocket requires the shared site key, independent of room
+host/moderator permissions. On first startup Sameframe securely generates 256
+random bits and atomically saves 64 lowercase hex characters in
+`./access-token` (file mode 0600; newly created parent directories 0700).
+The startup log names **only the file**, never the key. Choose another path with
+`--access-token-file PATH`. An existing malformed, unreadable, symlinked or
+insecurely permissioned file stops startup rather than silently rotating access.
+
+Read the key privately from that file and give it to your people separately from
+clean room invite links. They can paste it into the lock screen or use
+`https://your-site/?access_token=YOUR_KEY`. The lock screen removes that query
+before unlocking; it never returns private content just because a URL key looks
+valid. Browser localStorage remembers the key; a one-year HttpOnly, SameSite=Strict
+cookie admits later requests. The cookie contains a domain-separated digest,
+not the shared key. A query key is processed even when a cookie already exists.
+
+Use **HTTPS outside localhost/127.0.0.1/[::1]**. Public-host cookies are Secure,
+including when cloudflared connects to the backend over HTTP. Preserve the public
+`Host`; arbitrary forwarded headers are not trusted. URLs can still reach browser
+history, proxy/access logs or copied messages before JavaScript strips them:
+configure infrastructure not to record query strings and prefer pasting the key.
+Do not commit or publicly expose the token file or localStorage data.
+
+To revoke access, stop the server, atomically replace the file with a new securely
+generated 64-character lowercase hex key at mode 0600, then restart. All old
+cookies and remembered keys cease working; distribute the new key privately.
+Keep the file across ordinary restarts. This is one shared capability, not
+individual accounts, and does not turn guests into room hosts.
+
+### CLI configuration and systemd
+
+```sh
+sameframe                                      # Private; uses ./access-token
+sameframe --access-token-file /var/lib/sameframe/access-token
+sameframe --public                             # Disable site admission explicitly
+sameframe --help
+```
+
+`--public` neither creates nor reads a token file. It leaves room Keeper/Co-keeper
+permissions and same-origin checks intact, and conflicts with `--access-token-file`.
+Configuration is via CLI arguments, not `SAMEFRAME_ACCESS_TOKEN_FILE`.
+
+For systemd, use `StateDirectory=sameframe` and
+`WorkingDirectory=/var/lib/sameframe` (with a service user's writable home/state
+directory there). The default filename then resolves to
+`/var/lib/sameframe/access-token`; no hidden subdirectory is created. Alternatively,
+pass that absolute path in `ExecStart`. Preserve the state directory on restart.
+To keep an existing development key from the previous layout, move
+`.sameframe/access-token` to `./access-token` before restarting; there is no implicit
+migration or old-path fallback.
+
 ## Development
 
 ```sh
@@ -30,7 +83,7 @@ nix develop
 topcoat dev
 ```
 
-Open <http://127.0.0.1:3000>. Topcoat rebuilds and reloads the page as you edit.
+Open <http://127.0.0.1:3000> and unlock with the generated key. Topcoat rebuilds and reloads the page as you edit.
 Override the bind address with `HOST` and `PORT`:
 
 ```sh
@@ -46,6 +99,9 @@ setup. Topcoat UI and Tailwind are enabled; system fonts avoid another download.
 - `src/rooms.rs`: bounded registry and one state-owning task per room. Commands
   are authorized, validated, revision-checked, and deduplicated. Latest-state
   watch channels coalesce updates instead of accumulating a playback backlog.
+- `src/cli.rs`: explicit public mode and configurable access-token file path.
+- `src/access.rs`: persistent shared site key, bounded unlock attempts, and a
+  global cookie gate before routes or upgrades when private mode is enabled.
 - `src/api.rs`: room creation and same-origin WebSockets. Join deadlines, global
   connection limits, per-peer creation limits, message limits, and timed socket
   writes keep slow connections out of the room actor.
@@ -106,5 +162,5 @@ bound resource use, but are not complete DDoS protection.
 
 Serve pages and sockets from the same origin. A reverse proxy must preserve the
 public `Host`, support WebSocket upgrades, and allow long-lived connections.
-Host-only controls are deliberate for this slice; shared controls and host
-transfer are future work. Nobody has to register or log in.
+Nobody has to register: site admission is shared, while room host/moderator
+capabilities remain separately authorised.

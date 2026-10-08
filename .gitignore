@@ -27,3 +27,4 @@ rustc-ice-*.txt
 .direnv/
 result
 result-*
+.playwright-mcp/

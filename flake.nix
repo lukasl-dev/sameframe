@@ -84,6 +84,12 @@
 
           checks = {
             default = sameframe;
+            client = pkgs.runCommand "sameframe-client-tests" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+              cp -r ${./assets} assets
+              cp -r ${./tests} tests
+              node --test tests/client*.mjs
+              touch "$out"
+            '';
             clippy = craneLib.cargoClippy (
               commonArgs
               // {

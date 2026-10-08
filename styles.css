@@ -1,54 +1,11 @@
-/* Neutral, the built-in Topcoat theme.
-
-   The theme is a small set of design tokens. Components refer to tokens only,
-   never to raw colors, so a project restyles itself by editing the values in
-   `:root` and `.dark` below.
-
-     --background              the page background
-     --foreground              text and iconography on the background
-     --card                    cards and panel backgrounds
-     --card-foreground         text and iconography on cards and panels
-     --popover                 floating menu and popover backgrounds
-     --popover-foreground      text and iconography on floating surfaces
-     --muted-foreground        secondary text: captions, descriptions, placeholders
-     --primary                 the emphasis color: primary actions, selection, highlights
-     --primary-foreground      text on a primary-filled surface
-     --destructive             destructive actions and error states
-     --destructive-foreground  text on a destructive-filled surface
-     --border                  hairline borders and dividers
-     --ring                    the focus ring
-     --sidebar                 the sidebar background
-     --sidebar-foreground      sidebar text and icons
-     --sidebar-primary         primary actions inside the sidebar
-     --sidebar-primary-foreground  text on sidebar primary actions
-     --sidebar-accent          sidebar hover and selected backgrounds
-     --sidebar-accent-foreground   text on sidebar accents
-     --sidebar-border          sidebar borders and dividers
-     --sidebar-ring            sidebar focus rings
-     --shadow-xs               a subtle shadow for raised controls
-     --shadow-sm               a shadow for raised surfaces: cards, menus
-
-   Components derive hover and press states from their fill or foreground
-   color at reduced opacity. The sidebar has its own accent token for
-   interactive rows, so it can be themed independently.
-
-   The Geist font is not bundled here; provide it with topcoat-font. */
-
 @import "tailwindcss";
-
-/* Scan the project's Rust sources for the Tailwind classes they use. This
-   file is installed at the project root, so `./src` is the crate's source. */
 @source "./src/**/*.rs";
-
-/* Dark mode is opted into by putting the `dark` class on an ancestor,
-   typically <html>. */
+@source "./assets/room.js";
 @custom-variant dark (&:is(.dark *));
 
-/* Expose the tokens as Tailwind utilities (`bg-background`, `text-primary`,
-   `border-border`, ...). The indirection through plain variables on `:root`
-   and `.dark` is what lets the values swap when the color scheme changes. */
+/* Catppuccin Mocha, always dark. Keep Topcoat's semantic tokens available. */
 @theme inline {
-  --font-sans: "Geist", sans-serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -74,64 +31,122 @@
   --shadow-sm: var(--shadow-sm);
 }
 
-:root {
-  --background: oklch(0.9875 0.003 260);
-  --foreground: oklch(0.24 0.012 260);
-  --card: oklch(0.995 0.003 260);
-  --card-foreground: oklch(0.24 0.012 260);
-  --popover: oklch(0.995 0.003 260);
-  --popover-foreground: oklch(0.24 0.012 260);
-  --muted-foreground: oklch(0.51 0.014 260);
-  --primary: oklch(0.21 0.02 260);
-  --primary-foreground: oklch(0.985 0.003 260);
-  --destructive: oklch(0.55 0.2 27);
-  --destructive-foreground: oklch(0.99 0.012 27);
-  --border: oklch(0.9 0.008 260);
-  --ring: oklch(0.32 0.02 260);
-  --sidebar: oklch(0.995 0.003 260);
-  --sidebar-foreground: oklch(0.24 0.012 260);
-  --sidebar-primary: oklch(0.21 0.02 260);
-  --sidebar-primary-foreground: oklch(0.985 0.003 260);
-  --sidebar-accent: color-mix(in oklab, var(--sidebar-foreground) 10%, var(--sidebar));
-  --sidebar-accent-foreground: oklch(0.24 0.012 260);
-  --sidebar-border: oklch(0.9 0.008 260);
-  --sidebar-ring: oklch(0.32 0.02 260);
-  --shadow-xs: 0 1px 2px oklch(0.24 0.02 260 / 12%);
-  --shadow-sm:
-    0 1px 2px oklch(0.24 0.02 260 / 10%),
-    0 2px 8px -2px oklch(0.24 0.02 260 / 9%);
-}
-
-.dark {
-  --background: oklch(0.17 0.012 260);
-  --foreground: oklch(0.93 0.006 260);
-  --card: oklch(0.22 0.012 260);
-  --card-foreground: oklch(0.93 0.006 260);
-  --popover: oklch(0.22 0.012 260);
-  --popover-foreground: oklch(0.93 0.006 260);
-  --muted-foreground: oklch(0.68 0.012 260);
-  --primary: oklch(0.92 0.008 260);
-  --primary-foreground: oklch(0.21 0.015 260);
-  --destructive: oklch(0.66 0.18 25);
-  --destructive-foreground: oklch(0.14 0.02 25);
-  --border: oklch(0.3 0.012 260);
-  --ring: oklch(0.6 0.02 260);
-  --sidebar: oklch(0.22 0.012 260);
-  --sidebar-foreground: oklch(0.93 0.006 260);
-  --sidebar-primary: oklch(0.92 0.008 260);
-  --sidebar-primary-foreground: oklch(0.21 0.015 260);
-  --sidebar-accent: color-mix(in oklab, var(--sidebar-foreground) 10%, var(--sidebar));
-  --sidebar-accent-foreground: oklch(0.93 0.006 260);
-  --sidebar-border: oklch(0.3 0.012 260);
-  --sidebar-ring: oklch(0.6 0.02 260);
-  --shadow-xs: 0 1px 2px oklch(0 0 0 / 35%);
-  --shadow-sm:
-    0 1px 2px oklch(0 0 0 / 35%),
-    0 2px 8px -2px oklch(0 0 0 / 30%);
+:root, .dark {
+  color-scheme: dark;
+  --base: #1e1e2e;
+  --mantle: #181825;
+  --crust: #11111b;
+  --text: #cdd6f4;
+  --subtext: #bac2de;
+  --muted: #a6adc8;
+  --surface0: #313244;
+  --surface1: #45475a;
+  --lavender: #cba6f7;
+  --mauve: #cba6f7;
+  --pink: #f5c2e7;
+  --red: #f38ba8;
+  --green: #a6e3a1;
+  --background: var(--base);
+  --foreground: var(--text);
+  --card: var(--mantle);
+  --card-foreground: var(--text);
+  --popover: var(--surface0);
+  --popover-foreground: var(--text);
+  --muted-foreground: var(--muted);
+  --primary: var(--lavender);
+  --primary-foreground: var(--crust);
+  --destructive: var(--red);
+  --destructive-foreground: var(--crust);
+  --border: var(--surface0);
+  --ring: var(--lavender);
+  --sidebar: var(--mantle);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--lavender);
+  --sidebar-primary-foreground: var(--crust);
+  --sidebar-accent: var(--surface0);
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--surface0);
+  --sidebar-ring: var(--lavender);
+  --shadow-xs: 0 1px 2px rgb(0 0 0 / 15%);
+  --shadow-sm: 0 8px 28px rgb(0 0 0 / 12%);
 }
 
 @layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  html { min-width: 320px; background: var(--background); }
   body {
-    @apply bg-background font-sans text-foreground;
+    margin: 0;
+    min-height: 100svh;
+    display: flex;
+    flex-direction: column;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input { font: inherit; }
+  button, a, input { -webkit-tap-highlight-color: transparent; }
+  button { cursor: pointer; }
+  a { color: inherit; text-decoration: none; }
+  h1, h2, h3, p { margin: 0; }
+  h1, h2, h3 { color: var(--text); font-weight: 650; }
+  h1 { line-height: 1.15; letter-spacing: -.045em; }
+  h2 { font-size: 1.125rem; line-height: 1.4; letter-spacing: -.025em; }
+  h3 { font-size: .9375rem; line-height: 1.4; }
+  p { color: var(--subtext); }
+  svg { flex-shrink: 0; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; }
+  ::selection { background: var(--lavender); color: var(--crust); }
+  input {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    padding: 10px 12px;
+    color: var(--text);
+    background: var(--base);
+    border: 1px solid var(--surface1);
+    border-radius: 9px;
+    /* Avoid zooming forms on iOS. */
+    font-size: 16px;
+    line-height: 1.4;
+    transition: border-color 140ms;
+  }
+  input::placeholder { color: var(--muted); opacity: .85; }
+  input:hover { border-color: var(--muted); }
+  input:focus-visible { border-color: var(--lavender); outline-offset: 2px; }
+  input[readonly] { color: var(--subtext); font-size: .875rem; }
+  label { display: block; color: var(--text); font-size: .875rem; font-weight: 550; margin-bottom: 7px; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+}
+
+@layer components {
+  .skip-link { position: fixed; z-index: 30; top: 10px; left: 10px; padding: 12px 18px; border-radius: 8px; background: var(--primary); color: var(--primary-foreground); transform: translateY(-150%); }
+  .skip-link:focus { transform: translateY(0); }
+  .message { padding: 13px 16px; margin-top: 16px; border: 1px solid var(--surface1); border-radius: 10px; font-size: .875rem; overflow-wrap: anywhere; }
+  .message-error { color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--mantle)); border-color: color-mix(in srgb, var(--red) 35%, var(--mantle)); }
+
+  /* Only illustration motion lives here; page styling stays beside its markup. */
+  .nook-steam { animation: nook-steam 4s ease-in-out infinite; }
+  .nook-glow { animation: nook-glow 7s ease-in-out infinite; }
+  .nook-screen { animation: nook-glow 5s ease-in-out infinite reverse; }
+  .nook-dream { animation: nook-dream 6s ease-in-out infinite; }
+  @keyframes nook-steam {
+    0%, 100% { opacity: 0; transform: translateY(3px); }
+    35% { opacity: 1; }
+    80% { opacity: 0; transform: translateY(-8px); }
+  }
+  @keyframes nook-glow {
+    0%, 100% { opacity: .4; }
+    50% { opacity: 1; }
+  }
+  @keyframes nook-dream {
+    0%, 100% { opacity: .3; transform: translateY(2px); }
+    50% { opacity: .9; transform: translateY(-3px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   }
 }

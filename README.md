@@ -1,4 +1,4 @@
-# Sameframe
+# sameframe
 
 Watch YouTube together. Built with [Topcoat](https://github.com/tokio-rs/topcoat).
 
@@ -26,6 +26,16 @@ Use HTTPS for public hosting. Rooms disappear when the server restarts.
 nix develop
 topcoat dev
 ```
+
+## NixOS
+
+```nix
+imports = [ inputs.sameframe.nixosModules.default ];
+services.sameframe.enable = true;
+```
+
+Defaults: `127.0.0.1:3000`, private access, state in `/var/lib/sameframe`.
+Options: `package`, `host`, `port`, `public`, `dataDir`, `openFirewall`, `extraArgs`.
 
 ## Check
 

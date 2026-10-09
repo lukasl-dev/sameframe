@@ -1,5 +1,5 @@
 {
-  description = "Sameframe development environment";
+  description = "Sameframe";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -10,6 +10,11 @@
   outputs =
     inputs@{ crane, flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
+      flake.nixosModules = rec {
+        default = sameframe;
+        sameframe = import ./nix/module.nix { self = inputs.self; };
+      };
+
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -18,7 +23,7 @@
       ];
 
       perSystem =
-        { pkgs, ... }:
+        { pkgs, system, ... }:
         let
           craneLib = crane.mkLib pkgs;
 
@@ -82,6 +87,8 @@
             ];
           };
 
+          formatter = pkgs.nixfmt-tree;
+
           checks = {
             default = sameframe;
             client = pkgs.runCommand "sameframe-client-tests" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
@@ -107,6 +114,14 @@
                 ];
                 buildPhaseCargoCommand = "topcoat fmt --check --rustfmt src build.rs";
                 doInstallCargoArtifacts = false;
+              }
+            );
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            module = import ./nix/tests/module.nix { inherit inputs pkgs system; };
+            service = pkgs.testers.runNixOSTest (
+              import ./nix/tests/service.nix {
+                inherit inputs;
               }
             );
           };

@@ -1,5 +1,3 @@
-//! Ephemeral, host/moderator-controlled rooms. Socket I/O belongs to the caller, never the actor.
-
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
@@ -51,7 +49,6 @@ pub(crate) struct Membership {
     pub(crate) id: u64,
     pub(crate) role: Role,
     pub(crate) snapshots: watch::Receiver<Snapshot>,
-    // Dropping a membership (including a cancelled join reply) releases its slot.
     _lease: Lease,
 }
 
@@ -76,7 +73,6 @@ pub(crate) struct Snapshot {
     pub(crate) incarnation: String,
     pub(crate) room_name: String,
     pub(crate) revision: u64,
-    // Playback revision of the latest accepted load, even for the same video ID.
     pub(crate) media_revision: u64,
     pub(crate) video_id: Option<String>,
     pub(crate) playing: bool,
@@ -182,12 +178,10 @@ impl Rooms {
         }
     }
 
-    /// Same monotonic clock used by every production room's playback anchors.
     pub(crate) fn now_ms(&self) -> u64 {
         elapsed_ms(self.clock_origin)
     }
 
-    /// Requires a running Tokio runtime, but never awaits while holding the registry lock.
     pub(crate) fn create(&self) -> Result<CreatedRoom, RoomError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| UNAVAILABLE)?;
         let mut registry = self.registry.lock().expect("room registry poisoned");
@@ -213,6 +207,7 @@ impl Rooms {
         );
         registry.insert(room_id.clone(), RoomHandle { sender, departures });
         runtime.spawn(actor.run(receiver));
+
         Ok(CreatedRoom {
             room_id,
             host_token,
@@ -221,11 +216,13 @@ impl Rooms {
 
     pub(crate) fn get(&self, room_id: &str) -> Option<RoomHandle> {
         let mut registry = self.registry.lock().expect("room registry poisoned");
-        if registry.get(room_id)?.sender.is_closed() {
-            registry.remove(room_id);
-            return None;
+        let room = registry.get(room_id)?;
+        if !room.sender.is_closed() {
+            return Some(room.clone());
         }
-        registry.get(room_id).cloned()
+
+        registry.remove(room_id);
+        None
     }
 }
 
@@ -270,8 +267,6 @@ impl RoomHandle {
         response.await.map_err(|_| UNAVAILABLE)?
     }
 
-    /// Synchronous, idempotent, and independent of mailbox capacity. Unknown IDs
-    /// allocate nothing; pending departures are bounded by admitted membership.
     pub(crate) fn leave(&self, member_id: u64) {
         let leases = self
             .departures
@@ -293,7 +288,6 @@ impl RoomHandle {
 }
 
 fn random_secret() -> String {
-    // Thread-local rand RNG is OS-seeded. 256 random bits, encoded without padding.
     let bytes: [u8; 32] = rand::random();
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(64);
@@ -335,14 +329,10 @@ fn member_name(id: u64, offset: u8, stride: u8) -> String {
         "Waffle", "Goose", "Potato", "Otter", "Noodle", "Badger", "Pancake", "Penguin", "Pickle",
         "Muffin", "Llama", "Turnip", "Biscuit", "Raccoon", "Dumpling", "Puffin",
     ];
-    // An odd stride permutes all 256 pairs; the room's random offset/stride
-    // prevents every room starting with the same people while keeping names unique.
     let sequence = id - 1;
     let index = ((sequence % 256) * u64::from(stride) + u64::from(offset)) % 256;
     let adjective = ADJECTIVES[(index % 16) as usize];
-    let noun = NOUNS[((index / 16) % 16) as usize];
-    // Membership IDs never repeat. Number the noun after the vocabulary is used
-    // up so even a long-lived room never recycles an author's two-word name.
+    let noun = NOUNS[(index / 16) as usize];
     match sequence / 256 {
         0 => format!("{adjective} {noun}"),
         cycle => format!("{adjective} {noun}{}", cycle + 1),
@@ -417,13 +407,12 @@ struct Member {
 
 impl Member {
     fn take_command_token(&mut self, now: Instant) -> bool {
-        self.tokens = (self.tokens
-            + now
-                .saturating_duration_since(self.refilled_at)
-                .as_secs_f64()
-                * COMMANDS_PER_SECOND)
-            .min(COMMAND_BURST);
+        let elapsed_secs = now
+            .saturating_duration_since(self.refilled_at)
+            .as_secs_f64();
+        self.tokens = (self.tokens + elapsed_secs * COMMANDS_PER_SECOND).min(COMMAND_BURST);
         self.refilled_at = now;
+
         if self.tokens < 1.0 {
             return false;
         }
@@ -455,7 +444,7 @@ struct RoomActor {
     next_member_id: u64,
     snapshot: Snapshot,
     snapshots: watch::Sender<Snapshot>,
-    recent: VecDeque<AppliedCommand>,
+    recent_commands: VecDeque<AppliedCommand>,
     next_event_id: u64,
     clock_origin: Instant,
     empty_since: Option<Instant>,
@@ -493,7 +482,7 @@ impl RoomActor {
             next_member_id: 1,
             snapshot,
             snapshots,
-            recent: VecDeque::new(),
+            recent_commands: VecDeque::new(),
             next_event_id: 1,
             clock_origin,
             empty_since: Some(Instant::now()),
@@ -510,7 +499,6 @@ impl RoomActor {
             }
 
             tokio::select! {
-                // The deadline cannot be starved by traffic to an empty room.
                 biased;
                 _ = async {
                     match deadline {
@@ -521,19 +509,15 @@ impl RoomActor {
                 _ = self.departures.changed.notified() => {},
                 request = receiver.recv() => {
                     let Some(request) = request else { break };
-                    // A lease can be released while recv was pending.
                     self.remove_departed();
                     match request {
                         Request::Join { host_token, reply } => {
                             if !reply.is_closed() {
-                                // If the caller cancels concurrently, send drops the
-                                // returned Membership and its lease performs cleanup.
                                 let result = self.join(host_token);
                                 let _ = reply.send(result);
                             }
                         }
                         Request::Command { member_id, id, revision, action, reply } => {
-                            // An enqueued command may apply even if its caller goes away.
                             let result = self.command(member_id, id, revision, action);
                             let _ = reply.send(result);
                         }
@@ -545,7 +529,6 @@ impl RoomActor {
                 }
             }
         }
-        // Dropping receiver closes all registry/external handles and waiting replies.
     }
 
     fn join(&mut self, host_token: Option<String>) -> Result<Membership, RoomError> {
@@ -557,11 +540,11 @@ impl RoomActor {
         if self.members.len() >= MAX_MEMBERS {
             return Err(BUSY);
         }
+
         let id = self.next_member_id;
         let next_member_id = id.checked_add(1).ok_or(UNAVAILABLE)?;
-        // Preflight before admitting a lease; exhausted event IDs cannot leave
-        // an unreachable active membership behind.
         self.next_event_id.checked_add(1).ok_or(UNAVAILABLE)?;
+
         self.next_member_id = next_member_id;
         let active = Arc::new(AtomicBool::new(true));
         self.departures
@@ -585,6 +568,7 @@ impl RoomActor {
         self.record_event(id, FeedKind::Joined, None, None, None)?;
         self.update_participants();
         self.publish();
+
         Ok(Membership {
             id,
             role,
@@ -605,6 +589,7 @@ impl RoomActor {
         if departed.is_empty() {
             return;
         }
+
         departed.sort_unstable();
         for id in departed {
             let _ = self.record_event(id, FeedKind::Left, None, None, None);
@@ -619,7 +604,6 @@ impl RoomActor {
             self.empty_since = Some(Instant::now());
         }
         self.update_participants();
-        // Membership updates preserve the playback anchor, even while playing.
         self.publish();
     }
 
@@ -647,7 +631,6 @@ impl RoomActor {
         revision: u64,
         action: Action,
     ) -> Result<u64, RoomError> {
-        // Authorization precedes payload validation, revision checking and dedupe.
         let member = self.members.get_mut(&member_id).ok_or(FORBIDDEN)?;
         if member.role == Role::Guest || !member.active.load(Ordering::Acquire) {
             return Err(FORBIDDEN);
@@ -655,14 +638,16 @@ impl RoomActor {
         if !member.take_command_token(Instant::now()) {
             return Err(BUSY);
         }
+
         if !valid_id(&id) || !action.is_valid() {
             return Err(INVALID_COMMAND);
         }
         if self.snapshot.video_id.is_none() && !matches!(action, Action::SetVideo { .. }) {
             return Err(INVALID_COMMAND);
         }
+
         if let Some(applied) = self
-            .recent
+            .recent_commands
             .iter()
             .find(|applied| applied.member_id == member_id && applied.id == id)
         {
@@ -674,26 +659,11 @@ impl RoomActor {
         if revision != self.snapshot.revision {
             return Err(STALE_REVISION);
         }
+
         let next_revision = revision.checked_add(1).ok_or(UNAVAILABLE)?;
         let now_ms = elapsed_ms(self.clock_origin);
-        let (kind, text, video_id, position_secs) = match &action {
-            Action::SetVideo { video_id } => {
-                (FeedKind::SetVideo, None, Some(video_id.clone()), Some(0.0))
-            }
-            Action::Play { position_secs } => (FeedKind::Play, None, None, Some(*position_secs)),
-            Action::Pause { position_secs } => (FeedKind::Pause, None, None, Some(*position_secs)),
-            Action::Seek { position_secs } => (FeedKind::Seek, None, None, Some(*position_secs)),
-            Action::SetRate { playback_rate } => (
-                FeedKind::SetRate,
-                Some(format!("{playback_rate}x")),
-                None,
-                None,
-            ),
-        };
-        // Native scrubbing arrives as a combined position + playing intent.
-        // Compare against the old timeline, not its anchored (possibly stale) position.
-        let mut inferred_seek = None;
-        let mut record_action = true;
+        let mut seek_position = None;
+        let mut record_playback_event = true;
         if let Action::Play { position_secs } | Action::Pause { position_secs } = &action {
             let projected_position = if self.snapshot.playing {
                 let elapsed_secs = now_ms.saturating_sub(self.snapshot.anchor_ms) as f64 / 1000.0;
@@ -703,21 +673,44 @@ impl RoomActor {
                 self.snapshot.position_secs
             };
             if (*position_secs - projected_position).abs() > 0.75 {
-                inferred_seek = Some(*position_secs);
-                record_action = matches!(action, Action::Play { .. }) != self.snapshot.playing;
+                seek_position = Some(*position_secs);
+                record_playback_event =
+                    matches!(action, Action::Play { .. }) != self.snapshot.playing;
             }
         }
-        // A combined seek/state change must not append half an activity on overflow.
-        let event_count = u64::from(inferred_seek.is_some()) + u64::from(record_action);
+
+        let event_count = u64::from(seek_position.is_some()) + u64::from(record_playback_event);
         self.next_event_id
             .checked_add(event_count)
             .ok_or(UNAVAILABLE)?;
-        if let Some(position_secs) = inferred_seek {
+
+        if let Some(position_secs) = seek_position {
             self.record_event(member_id, FeedKind::Seek, None, None, Some(position_secs))?;
         }
-        if record_action {
+        if record_playback_event {
+            let (kind, text, video_id, position_secs) = match &action {
+                Action::SetVideo { video_id } => {
+                    (FeedKind::SetVideo, None, Some(video_id.clone()), Some(0.0))
+                }
+                Action::Play { position_secs } => {
+                    (FeedKind::Play, None, None, Some(*position_secs))
+                }
+                Action::Pause { position_secs } => {
+                    (FeedKind::Pause, None, None, Some(*position_secs))
+                }
+                Action::Seek { position_secs } => {
+                    (FeedKind::Seek, None, None, Some(*position_secs))
+                }
+                Action::SetRate { playback_rate } => (
+                    FeedKind::SetRate,
+                    Some(format!("{playback_rate}x")),
+                    None,
+                    None,
+                ),
+            };
             self.record_event(member_id, kind, text, video_id, position_secs)?;
         }
+
         match &action {
             Action::SetVideo { video_id } => {
                 self.snapshot.media_revision = next_revision;
@@ -738,7 +731,6 @@ impl RoomActor {
                 self.snapshot.position_secs = *position_secs;
             }
             Action::SetRate { playback_rate } => {
-                // Preserve continuity: elapsed playback belongs to the old rate.
                 if self.snapshot.playing {
                     let elapsed_secs =
                         now_ms.saturating_sub(self.snapshot.anchor_ms) as f64 / 1000.0;
@@ -751,10 +743,11 @@ impl RoomActor {
         }
         self.snapshot.anchor_ms = now_ms;
         self.snapshot.revision = next_revision;
-        if self.recent.len() == RECENT_COMMANDS {
-            self.recent.pop_front();
+
+        if self.recent_commands.len() == RECENT_COMMANDS {
+            self.recent_commands.pop_front();
         }
-        self.recent.push_back(AppliedCommand {
+        self.recent_commands.push_back(AppliedCommand {
             member_id,
             id,
             expected_revision: revision,
@@ -762,6 +755,7 @@ impl RoomActor {
             applied_revision: next_revision,
         });
         self.publish();
+
         Ok(next_revision)
     }
 
@@ -780,6 +774,7 @@ impl RoomActor {
         if !member.take_command_token(Instant::now()) {
             return Err(BUSY);
         }
+
         if !valid_id(&id) {
             return Err(INVALID_COMMAND);
         }
@@ -796,7 +791,7 @@ impl RoomActor {
             }
             _ => {}
         }
-        let member = self.members.get(&member_id).ok_or(FORBIDDEN)?;
+
         if let Some(applied) = member.recent_social.iter().find(|applied| applied.id == id) {
             if applied.action != action {
                 return Err(INVALID_COMMAND);
@@ -841,16 +836,15 @@ impl RoomActor {
             enabled,
         } = &action
         {
-            self.members
-                .get_mut(target_id)
-                .expect("validated target")
-                .role = if *enabled {
+            let target = self.members.get_mut(target_id).expect("validated target");
+            target.role = if *enabled {
                 Role::Moderator
             } else {
                 Role::Guest
             };
             self.update_participants();
         }
+
         let recent = &mut self
             .members
             .get_mut(&member_id)
@@ -865,6 +859,7 @@ impl RoomActor {
             event_id,
         });
         self.publish();
+
         Ok(event_id)
     }
 
@@ -890,6 +885,7 @@ impl RoomActor {
             video_id,
             position_secs,
         };
+
         self.next_event_id = next_id;
         if self.snapshot.events.len() == MAX_EVENTS {
             self.snapshot.events.remove(0);
@@ -899,7 +895,6 @@ impl RoomActor {
     }
 
     fn publish(&self) {
-        // Retain the latest snapshot even when there are currently no receivers.
         self.snapshots.send_replace(self.snapshot.clone());
     }
 }
@@ -922,6 +917,8 @@ impl Action {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn test_rooms(ttl: Duration) -> Rooms {
@@ -957,15 +954,19 @@ mod tests {
         let clone = rooms.clone();
         let before = rooms.now_ms();
         let created = rooms.create().unwrap();
+
         assert_eq!(created.room_id.len(), 64);
         assert_eq!(created.host_token.len(), 64);
         assert_ne!(created.room_id, created.host_token);
+
         let room = clone.get(&created.room_id).unwrap();
         let guest = room.join(None).await.unwrap();
         let initial = guest.snapshots.borrow().clone();
+
         assert!(initial.anchor_ms >= before);
         assert!(initial.anchor_ms <= rooms.now_ms());
         assert_ne!(initial.incarnation, created.host_token);
+
         let (other, host) = host_room(&Rooms::new()).await;
         assert_eq!(
             other.command(host.id, "anchor".into(), 0, video()).await,
@@ -1006,6 +1007,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(host.snapshots.borrow().participants, joined.participants);
+
         room.leave(guest.id);
         settle().await;
 
@@ -1019,6 +1021,7 @@ mod tests {
     async fn authentication_precedes_validation_revision_and_dedupe() {
         let rooms = Rooms::new();
         let (room, host) = host_room(&rooms).await;
+
         assert_eq!(host.role, Role::Host);
         assert_eq!(
             room.join(Some("wrong".into())).await.err(),
@@ -1026,10 +1029,12 @@ mod tests {
         );
         let guest = room.join(None).await.unwrap();
         assert_eq!(guest.role, Role::Guest);
+
         assert_eq!(
             room.command(host.id, "valid".into(), 0, video()).await,
             Ok(1)
         );
+
         for (id, revision, action) in [
             ("valid", 0, video()),
             (
@@ -1049,6 +1054,7 @@ mod tests {
             room.command(u64::MAX, "valid".into(), 0, video()).await,
             Err(FORBIDDEN)
         );
+
         room.leave(host.id);
         assert_eq!(
             room.command(host.id, "valid".into(), 0, video()).await,
@@ -1060,6 +1066,7 @@ mod tests {
     async fn playing_anchors_are_monotonic_and_membership_does_not_reanchor() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
+
         assert_eq!(
             room.command(host.id, "video".into(), 0, video()).await,
             Ok(1)
@@ -1090,6 +1097,7 @@ mod tests {
         let current_position = joined.position_secs
             + (elapsed_ms(rooms.clock_origin) - joined.anchor_ms) as f64 / 1000.0;
         assert_eq!(current_position, 15.5);
+
         drop(guest);
         settle().await;
         assert_eq!(host.snapshots.borrow().anchor_ms, 2000);
@@ -1108,6 +1116,7 @@ mod tests {
         );
         assert!(host.snapshots.borrow().playing);
         assert_eq!(host.snapshots.borrow().anchor_ms, 5000);
+
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(
             room.command(
@@ -1123,6 +1132,7 @@ mod tests {
         );
         assert!(!host.snapshots.borrow().playing);
         assert_eq!(host.snapshots.borrow().anchor_ms, 6000);
+
         assert_eq!(
             room.command(
                 host.id,
@@ -1134,6 +1144,7 @@ mod tests {
             Ok(5)
         );
         assert!(!host.snapshots.borrow().playing);
+
         assert_eq!(
             room.command(host.id, "reset".into(), 5, video()).await,
             Ok(6)
@@ -1146,6 +1157,7 @@ mod tests {
     async fn rate_changes_reanchor_using_the_old_rate_without_advancing_paused_playback() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
+
         assert_eq!(host.snapshots.borrow().playback_rate, 1.0);
         assert_eq!(
             room.command(host.id, "load".into(), 0, video()).await,
@@ -1176,6 +1188,7 @@ mod tests {
             Ok(3)
         );
         let double = host.snapshots.borrow().clone();
+
         assert_eq!(double.position_secs, 12.0);
         assert_eq!(double.anchor_ms, 2000);
         assert_eq!(double.playback_rate, 2.0);
@@ -1194,12 +1207,14 @@ mod tests {
             Ok(3)
         );
         assert_eq!(*host.snapshots.borrow(), double);
+
         let guest = room.join(None).await.unwrap();
         let joined = guest.snapshots.borrow().clone();
         assert_eq!(joined.anchor_ms, double.anchor_ms);
         assert_eq!(joined.position_secs, double.position_secs);
         assert_eq!(joined.playback_rate, double.playback_rate);
         assert_eq!(joined.revision, double.revision);
+
         drop(guest);
         settle().await;
         let departed = host.snapshots.borrow().clone();
@@ -1211,6 +1226,7 @@ mod tests {
         assert_eq!(departed.playback_rate, double.playback_rate);
         assert_eq!(departed.events.len(), double.events.len() + 2);
         assert_eq!(departed.events.last().unwrap().kind, FeedKind::Left);
+
         assert_eq!(
             room.command(
                 host.id,
@@ -1360,6 +1376,7 @@ mod tests {
         let slow = host.snapshots.borrow().clone();
         assert_eq!(slow.playback_rate, 0.25);
         assert_eq!(slow.media_revision, 1);
+
         assert_eq!(
             room.command(host.id, "minimum".into(), 1, minimum.clone())
                 .await,
@@ -1417,6 +1434,7 @@ mod tests {
     async fn media_revision_changes_only_on_accepted_loads_including_the_same_video() {
         let rooms = Rooms::new();
         let (room, host) = host_room(&rooms).await;
+
         assert_eq!(host.snapshots.borrow().media_revision, 0);
         assert_eq!(
             room.command(host.id, "load".into(), 0, video()).await,
@@ -1424,7 +1442,6 @@ mod tests {
         );
         assert_eq!(host.snapshots.borrow().media_revision, 1);
 
-        // Native controls can produce zero-position anchors without reloading media.
         for (revision, action) in [
             (1, Action::Play { position_secs: 0.0 }),
             (2, Action::Seek { position_secs: 0.0 }),
@@ -1438,15 +1455,16 @@ mod tests {
             assert_eq!(host.snapshots.borrow().revision, revision + 1);
             assert_eq!(host.snapshots.borrow().media_revision, 1);
         }
+
         let guest = room.join(None).await.unwrap();
         assert_eq!(guest.snapshots.borrow().media_revision, 1);
         assert_eq!(guest.snapshots.borrow().revision, 4);
+
         drop(guest);
         settle().await;
         assert_eq!(host.snapshots.borrow().media_revision, 1);
         assert_eq!(host.snapshots.borrow().revision, 4);
 
-        // Selecting the identical video is a new load, not an ordinary pause/seek.
         assert_eq!(
             room.command(host.id, "reload".into(), 4, video()).await,
             Ok(5)
@@ -1456,6 +1474,7 @@ mod tests {
         assert_eq!(reloaded.video_id, Some("dQw4w9WgXcQ".into()));
         assert!(!reloaded.playing);
         assert_eq!(reloaded.position_secs, 0.0);
+
         assert_eq!(
             room.command(host.id, "reload".into(), 4, video()).await,
             Ok(5)
@@ -1507,6 +1526,7 @@ mod tests {
             Ok(1)
         );
         let first = host.snapshots.borrow().clone();
+
         assert_eq!(
             room.command(host.id, "first".into(), 0, video()).await,
             Ok(1)
@@ -1516,6 +1536,7 @@ mod tests {
             room.command(host.id, "stale".into(), 0, video()).await,
             Err(STALE_REVISION)
         );
+
         assert_eq!(
             room.command(
                 host.id,
@@ -1527,6 +1548,7 @@ mod tests {
             Ok(2)
         );
         let second = host.snapshots.borrow().clone();
+
         assert_eq!(
             room.command(host.id, "first".into(), 0, video()).await,
             Ok(1)
@@ -1553,6 +1575,7 @@ mod tests {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, mut host) = host_room(&rooms).await;
         let initial = host.snapshots.borrow_and_update().clone();
+
         tokio::time::advance(Duration::from_secs(1)).await;
         for action in [
             Action::Play {
@@ -1578,7 +1601,6 @@ mod tests {
             room.command(host.id, "video".into(), 0, video()).await,
             Ok(1)
         );
-        // Rejected IDs are not recorded as applied; playback is now allowed.
         for (revision, action) in [
             (
                 1,
@@ -1618,6 +1640,7 @@ mod tests {
     async fn invalid_ids_videos_and_positions_are_rejected() {
         let rooms = Rooms::new();
         let (room, host) = host_room(&rooms).await;
+
         for id in ["".to_string(), "x".repeat(65), "é".to_string()] {
             assert_eq!(
                 room.command(host.id, id, 0, video()).await,
@@ -1639,6 +1662,7 @@ mod tests {
             );
         }
         assert_eq!(host.snapshots.borrow().revision, 0);
+
         assert_eq!(
             room.command(host.id, "video".into(), 0, video()).await,
             Ok(1)
@@ -1651,6 +1675,7 @@ mod tests {
             );
         }
         assert_eq!(host.snapshots.borrow().revision, 1);
+
         assert_eq!(
             room.command(
                 host.id,
@@ -1675,14 +1700,17 @@ mod tests {
         }
         assert_eq!(host.snapshots.borrow().members, MAX_MEMBERS);
         assert_eq!(room.join(None).await.err(), Some(BUSY));
+
         let guest = guests.pop().unwrap();
         room.leave(guest.id);
         room.leave(guest.id);
         let replacement = room.join(None).await.unwrap();
         assert_ne!(guest.id, replacement.id);
-        drop(guest); // Cannot release a newer member's slot.
+
+        drop(guest);
         settle().await;
         assert_eq!(host.snapshots.borrow().members, MAX_MEMBERS);
+
         drop(guests);
         drop(replacement);
         settle().await;
@@ -1713,6 +1741,7 @@ mod tests {
                 Ok(revision + 1)
             );
         }
+
         host.snapshots.changed().await.unwrap();
         let snapshot = host.snapshots.borrow_and_update().clone();
         assert_eq!(snapshot.revision, 11);
@@ -1725,6 +1754,7 @@ mod tests {
     async fn command_rate_limit_has_burst_and_refill() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
+
         for revision in 0..20 {
             assert_eq!(
                 room.command(host.id, revision.to_string(), revision, video())
@@ -1766,15 +1796,17 @@ mod tests {
         let member = room.join(None).await.unwrap();
         tokio::time::advance(ttl * 2).await;
         assert!(!room.sender.is_closed());
+
         drop(member);
         settle().await;
         tokio::time::advance(ttl - Duration::from_millis(1)).await;
         settle().await;
         assert!(!room.sender.is_closed());
-        // Rejoin cancels empty expiry; a subsequent departure restarts it.
+
         let member = room.join(None).await.unwrap();
         tokio::time::advance(ttl).await;
         assert!(!room.sender.is_closed());
+
         drop(member);
         settle().await;
         tokio::time::advance(ttl).await;
@@ -1790,6 +1822,7 @@ mod tests {
             rooms.create().unwrap();
         }
         assert_eq!(rooms.create().err(), Some(BUSY));
+
         settle().await;
         tokio::time::advance(Duration::from_secs(1)).await;
         settle().await;
@@ -1802,7 +1835,7 @@ mod tests {
     async fn departures_survive_a_full_mailbox_and_cancelled_join() {
         let rooms = Rooms::new();
         let (room, host) = host_room(&rooms).await;
-        // No await while filling: the current-thread actor cannot drain the queue.
+
         let mut responses = Vec::new();
         for _ in 0..MAILBOX_CAPACITY {
             let (reply, response) = oneshot::channel();
@@ -1820,6 +1853,7 @@ mod tests {
             room.command(host.id, "full".into(), 0, video()).await,
             Err(BUSY)
         );
+
         room.leave(host.id);
         room.leave(u64::MAX);
         for response in responses {
@@ -1838,7 +1872,6 @@ mod tests {
         settle().await;
         assert_eq!(host.snapshots.borrow().members, 0);
 
-        // Cancellation after actor admission also drops the lease in the reply.
         let (reply, response) = oneshot::channel();
         room.enqueue(Request::Join {
             host_token: None,
@@ -1856,6 +1889,7 @@ mod tests {
     async fn dedupe_cache_is_bounded_and_old_ids_obey_revision_checks() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
+
         for revision in 0..=RECENT_COMMANDS as u64 {
             tokio::time::advance(Duration::from_millis(100)).await;
             assert_eq!(
@@ -1889,6 +1923,7 @@ mod tests {
         .await
         .unwrap();
         let playing = host.snapshots.borrow().clone();
+
         assert_eq!(
             &playing.events[loaded.events.len()..],
             &[FeedEntry {
@@ -1903,6 +1938,7 @@ mod tests {
                 position_secs: Some(0.0),
             }]
         );
+
         room.command(
             host.id,
             "double-rate".into(),
@@ -1988,6 +2024,7 @@ mod tests {
             let before = host.snapshots.borrow().clone();
             let revision = before.revision;
             let id = format!("native-{index}");
+
             assert_eq!(
                 room.command(host.id, id.clone(), revision, action.clone())
                     .await,
@@ -2092,24 +2129,25 @@ mod tests {
             .await
             .unwrap();
         let moderator = host.snapshots.borrow().clone();
+
         assert_eq!(moderator.participants[1].role, Role::Moderator);
         assert_eq!(moderator.participants[1].name, initial.participants[1].name);
         assert_eq!(moderator.revision, initial.revision);
         assert_eq!(moderator.media_revision, initial.media_revision);
         assert_eq!(moderator.anchor_ms, initial.anchor_ms);
         assert_eq!(moderator.room_name, initial.room_name);
-        assert_eq!(moderator.events.last().unwrap().kind, FeedKind::RoleChanged);
-        assert_eq!(moderator.events.last().unwrap().member_id, host.id);
+
+        let role_change = moderator.events.last().unwrap();
+        assert_eq!(role_change.kind, FeedKind::RoleChanged);
+        assert_eq!(role_change.member_id, host.id);
         assert!(
-            moderator
-                .events
-                .last()
-                .unwrap()
+            role_change
                 .text
                 .as_ref()
                 .unwrap()
                 .contains(&initial.participants[1].name)
         );
+
         assert_eq!(
             room.social(
                 guest.id,
@@ -2143,6 +2181,7 @@ mod tests {
             );
         }
         let playback = host.snapshots.borrow().clone();
+
         assert_eq!(
             playback
                 .events
@@ -2184,6 +2223,7 @@ mod tests {
         .await
         .unwrap();
         let revoked = host.snapshots.borrow().clone();
+
         assert_eq!(revoked.participants[1].role, Role::Guest);
         assert_eq!(revoked.revision, playback.revision);
         assert_eq!(revoked.media_revision, playback.media_revision);
@@ -2206,7 +2246,7 @@ mod tests {
             room.social(host.id, "grant".into(), grant.clone()).await,
             Ok(granted)
         );
-        assert_eq!(*host.snapshots.borrow(), revoked); // Retry must not re-grant.
+        assert_eq!(*host.snapshots.borrow(), revoked);
 
         room.leave(guest.id);
         settle().await;
@@ -2286,6 +2326,7 @@ mod tests {
         assert_eq!(social.video_id, before.video_id);
         assert_eq!(social.playing, before.playing);
         assert_eq!(social.room_name, before.room_name);
+
         assert_eq!(
             serde_json::to_value(&social.events[social.events.len() - 2]).unwrap(),
             serde_json::json!({
@@ -2307,14 +2348,15 @@ mod tests {
         settle().await;
         let departed = host.snapshots.borrow().clone();
         assert_eq!(departed.participants.len(), 1);
+        assert_eq!(departed.revision, before.revision);
+        assert_eq!(departed.anchor_ms, before.anchor_ms);
+
         assert_eq!(&departed.events[..social.events.len()], &social.events);
         let left = departed.events.last().unwrap();
         assert_eq!(left.kind, FeedKind::Left);
         assert_eq!(left.member_id, author.id);
         assert_eq!(left.name, author.name);
         assert_eq!(left.avatar, author.avatar);
-        assert_eq!(departed.revision, before.revision);
-        assert_eq!(departed.anchor_ms, before.anchor_ms);
 
         drop(host);
         settle().await;
@@ -2371,6 +2413,7 @@ mod tests {
             .await,
             Err(INVALID_COMMAND)
         );
+
         let host_id = room
             .social(host.id, "same".into(), message.clone())
             .await
@@ -2443,6 +2486,7 @@ mod tests {
             Err(BUSY)
         );
         assert_eq!(*host.snapshots.borrow(), boundary);
+
         tokio::time::advance(Duration::from_millis(100)).await;
         assert!(
             room.social(guest.id, "refill".into(), message.clone())
@@ -2476,7 +2520,6 @@ mod tests {
         );
         let loaded = host.snapshots.borrow().clone();
 
-        // An authorized different author must not borrow somebody else's ack.
         assert_eq!(
             room.command(guest.id, "shared-id".into(), 0, video()).await,
             Err(STALE_REVISION)
@@ -2572,6 +2615,7 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].at_ms <= pair[1].at_ms)
         );
+
         assert_eq!(coalesced.revision, before.revision);
         assert_eq!(coalesced.media_revision, before.media_revision);
         assert_eq!(coalesced.anchor_ms, before.anchor_ms);
@@ -2587,9 +2631,10 @@ mod tests {
             room.social(guest.id, "1".into(), message.clone()).await,
             Ok(ids[1])
         );
-        assert_eq!(*host.snapshots.borrow(), coalesced); // Dedupe outlives visible history.
+        assert_eq!(*host.snapshots.borrow(), coalesced);
+
         let recycled = room.social(guest.id, "0".into(), message).await.unwrap();
-        assert!(recycled > *ids.last().unwrap()); // Outside the bounded retry window.
+        assert!(recycled > *ids.last().unwrap());
         assert_eq!(host.snapshots.borrow().events.len(), MAX_EVENTS);
     }
 
@@ -2599,16 +2644,18 @@ mod tests {
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
         let host = room.join(Some(created.host_token)).await.unwrap();
-        let mut names = std::collections::HashSet::new();
+        let mut names = HashSet::new();
         names.insert(host.snapshots.borrow().participants[0].name.clone());
 
         for _ in 0..300 {
             let guest = room.join(None).await.unwrap();
             let joined = guest.snapshots.borrow().clone();
             let participant = joined.participants.last().unwrap();
+
             assert_eq!(participant.name.split_whitespace().count(), 2);
             assert!(names.insert(participant.name.clone()));
             assert_eq!(host.snapshots.borrow().participants, joined.participants);
+
             drop(guest);
         }
         settle().await;
@@ -2621,7 +2668,7 @@ mod tests {
     #[test]
     fn random_name_permutations_cover_every_pair_without_repeats() {
         for (offset, stride) in [(0, 1), (231, 73), (255, 255)] {
-            let names: std::collections::HashSet<_> = (1..=256)
+            let names: HashSet<_> = (1..=256)
                 .map(|id| member_name(id, offset, stride))
                 .collect();
 
@@ -2642,6 +2689,7 @@ mod tests {
         let action: Action =
             serde_json::from_str(r#"{"type":"set_video","video_id":"dQw4w9WgXcQ"}"#).unwrap();
         assert_eq!(action, video());
+
         let rate: Action =
             serde_json::from_str(r#"{"type":"set_rate","playback_rate":1.5}"#).unwrap();
         assert_eq!(rate, Action::SetRate { playback_rate: 1.5 });
@@ -2655,9 +2703,11 @@ mod tests {
             serde_json::from_str::<Action>(r#"{"type":"seek","position_secs":1,"extra":true}"#)
                 .is_err()
         );
+
         assert_eq!(serde_json::to_value(Role::Host).unwrap(), "host");
         assert_eq!(serde_json::to_value(Role::Guest).unwrap(), "guest");
         assert_eq!(serde_json::to_value(Role::Moderator).unwrap(), "moderator");
+
         let social: SocialAction =
             serde_json::from_str(r#"{"type":"set_moderator","member_id":2,"enabled":true}"#)
                 .unwrap();
@@ -2674,6 +2724,7 @@ mod tests {
             )
             .is_err()
         );
+
         let snapshot = Snapshot {
             incarnation: "random".into(),
             room_name: "The Sleepy Observatory".into(),
@@ -2702,6 +2753,7 @@ mod tests {
                 "events": [],
             })
         );
+
         let created = CreatedRoom {
             room_id: "room".into(),
             host_token: "secret".into(),

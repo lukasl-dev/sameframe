@@ -1,4 +1,3 @@
-//! Site admission is separate from room membership and host capabilities.
 use std::{
     collections::HashMap,
     fs::{self, DirBuilder, File},
@@ -64,8 +63,6 @@ impl Access {
         match read_token(path) {
             Ok(token) => return Ok(Self::new(token)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                // A dangling symlink is an existing, unreadable token, not permission
-                // to replace it with a new capability.
                 if fs::symlink_metadata(path).is_ok() {
                     return Err(io::Error::other("access token file is unreadable"));
                 }
@@ -88,9 +85,6 @@ impl Access {
             .try_fill_bytes(&mut random)
             .map_err(|_| io::Error::other("could not generate site access token"))?;
         let token = hex(&random);
-        // tempfile creates a private file in the same directory. Publish the fully
-        // synced file with a no-clobber hard link, so simultaneous starts agree on
-        // the winner and crashes never leave a partially written destination.
         let mut pending = tempfile::NamedTempFile::new_in(parent)?;
         #[cfg(unix)]
         pending
@@ -152,6 +146,7 @@ impl Access {
         let Some(key) = &self.key else {
             return true;
         };
+
         let mut found = None;
         for header in headers.get_all("cookie") {
             let Ok(header) = header.to_str() else {
@@ -161,14 +156,12 @@ impl Access {
                 let Some((name, value)) = part.trim().split_once('=') else {
                     continue;
                 };
-                if name == COOKIE {
-                    if found.is_some() {
-                        return false;
-                    }
-                    found = Some(value);
+                if name == COOKIE && found.replace(value).is_some() {
+                    return false;
                 }
             }
         }
+
         found.is_some_and(|value| fixed_equal(value, &key.cookie))
     }
 
@@ -189,6 +182,7 @@ impl Access {
         {
             return false;
         }
+
         attempts.global.count += 1;
         let window = attempts.peers.entry(peer).or_insert(AttemptWindow {
             started: now,
@@ -197,6 +191,7 @@ impl Access {
         if window.count >= 12 {
             return false;
         }
+
         window.count += 1;
         true
     }
@@ -207,6 +202,7 @@ fn read_token(path: &FilePath) -> io::Result<String> {
     if !metadata.file_type().is_file() {
         return Err(io::Error::other("access token must be a regular file"));
     }
+
     let file = File::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -218,6 +214,7 @@ fn read_token(path: &FilePath) -> io::Result<String> {
             "access token file permissions must be 0600",
         ));
     }
+
     let mut bytes = Vec::new();
     file.take(66).read_to_end(&mut bytes)?;
     if bytes.last() == Some(&b'\n') {
@@ -300,8 +297,6 @@ impl Layer for AccessGate {
             let access = app_context::<Access>(cx);
             let authenticated = access.authenticated(headers(cx));
 
-            // Runs before BodyLimit and route extractors, including websocket
-            // upgrade extraction. A URL token never authenticates a request.
             if !public && (!authenticated || (access.key.is_some() && document && query_token)) {
                 if document {
                     if method(cx) == Method::HEAD {
@@ -319,9 +314,6 @@ impl Layer for AccessGate {
                 return denied(StatusCode::UNAUTHORIZED);
             }
 
-            // Topcoat's built-in origin layer precedes user layers. Enforce its
-            // defence here instead, so even cross-origin locked requests get the
-            // access-required response without reaching room/runtime handlers.
             let cross_site = headers(cx)
                 .get("sec-fetch-site")
                 .is_some_and(|site| site != "same-origin" && site != "none");
@@ -368,6 +360,7 @@ async fn unlock(cx: &Cx, body: Body) -> Result<Response> {
     }) {
         return denied(StatusCode::FORBIDDEN);
     }
+
     let bytes = match to_bytes(body, 1024).await {
         Ok(bytes) => bytes,
         Err(_) => return denied(StatusCode::PAYLOAD_TOO_LARGE),
@@ -379,7 +372,6 @@ async fn unlock(cx: &Cx, body: Body) -> Result<Response> {
         return denied(StatusCode::FORBIDDEN);
     }
 
-    // Host, not spoofable forwarded headers, controls public-cookie security.
     let secure = if loopback_host(headers(cx)) {
         ""
     } else {
@@ -398,7 +390,6 @@ async fn unlock(cx: &Cx, body: Body) -> Result<Response> {
         .body(Body::empty())?)
 }
 
-// Deliberately not public: AccessGate verifies the cookie before this handler.
 #[route(GET "/api/access")]
 async fn verify_cookie() -> Result<Response> {
     Ok(Response::builder()
@@ -449,7 +440,6 @@ mod tests {
     fn router_with_rooms(rooms: Rooms) -> Router {
         Router::builder()
             .app_context(Access::for_test(token()))
-            // URL resolution only; no bundler or build-time assets required.
             .app_context(AssetConfig::hosted_at(
                 "/_topcoat/assets",
                 topcoat::asset::Manifest {
@@ -483,7 +473,7 @@ mod tests {
             .route(RouteFn::new(
                 Method::GET,
                 "/_topcoat/assets/gate.css",
-                |_, _| Box::pin(async { Ok(Response::new(Body::from("/* public code */"))) }),
+                |_, _| Box::pin(async { Ok(Response::new(Body::from("body {}"))) }),
             ))
             .discover()
             .build()
@@ -525,6 +515,7 @@ mod tests {
     #[tokio::test]
     async fn every_document_is_locked_before_private_or_unavailable_content() {
         let router = router();
+
         for path in [
             "/",
             "/room/missing",
@@ -555,9 +546,11 @@ mod tests {
             assert!(!body.contains("missing"));
             assert!(!body.contains("not-a-route"));
         }
+
         let head = router.handle(request("HEAD", "/unknown", false)).await;
         assert_eq!(head.status(), StatusCode::UNAUTHORIZED);
         assert!(text(head).await.is_empty());
+
         let authed_unknown = router.handle(request("GET", "/unknown", true)).await;
         assert_eq!(authed_unknown.status(), StatusCode::NOT_FOUND);
     }
@@ -575,6 +568,7 @@ mod tests {
             .handle(request("GET", &format!("/room/{}", created.room_id), false))
             .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
         let body = text(response).await;
 
         for secret in [
@@ -593,6 +587,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_query_token_always_gets_gate_even_with_authenticated_cookie() {
         let router = router();
+
         for path in [
             format!("/?access_token={}", token()),
             "/?%61ccess%5Ftoken=bad&other=1".into(),
@@ -603,6 +598,7 @@ mod tests {
             assert_eq!(response.headers()["referrer-policy"], "no-referrer");
             assert!(!text(response).await.contains(&token()));
         }
+
         let response = router
             .handle(request("GET", "/api/missing?%61ccess_token=bad", true))
             .await;
@@ -613,6 +609,7 @@ mod tests {
     #[tokio::test]
     async fn locked_api_mutations_upgrades_and_runtime_never_receive_html() {
         let router = router();
+
         for (method, path) in [
             ("POST", "/api/rooms"),
             ("GET", "/api/access"),
@@ -627,9 +624,11 @@ mod tests {
             }
             req.headers_mut()
                 .insert("origin", "https://hostile.example".parse().unwrap());
+
             let response = router.handle(req).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(response.headers()["content-type"], "application/json");
+
             let body = text(response).await;
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&body).unwrap(),
@@ -637,6 +636,7 @@ mod tests {
             );
             assert!(!body.contains(&token()));
         }
+
         assert_eq!(
             router
                 .handle(request("GET", "/api/access", true))
@@ -656,6 +656,7 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+
         let asset = router
             .handle(request(
                 "GET",
@@ -666,7 +667,7 @@ mod tests {
         assert_eq!(asset.status(), StatusCode::OK);
         assert_eq!(asset.headers()["referrer-policy"], "no-referrer");
         assert_eq!(asset.headers()["cache-control"], "no-store");
-        // HEAD may be a 405 on a GET-only fixture, but must not be blocked by the gate.
+
         assert_ne!(
             router
                 .handle(request("HEAD", "/_topcoat/assets/gate.css", false))
@@ -674,6 +675,7 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+
         for path in [
             "/_topcoat/assets",
             "/_topcoat/assets/",
@@ -691,6 +693,7 @@ mod tests {
                 "{path}"
             );
         }
+
         assert_eq!(
             router
                 .handle(request("POST", "/_topcoat/assets/gate.css", false))
@@ -704,6 +707,7 @@ mod tests {
     async fn unlock_is_strict_bounded_same_origin_and_sets_private_persistent_cookie() {
         let router = router();
         let body = serde_json::json!({"token":token()}).to_string();
+
         for origin in [
             None,
             Some("null"),
@@ -716,6 +720,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert!(!text(response).await.contains(&token()));
         }
+
         for malformed in [
             "{}".into(),
             "not json".into(),
@@ -733,6 +738,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert!(!text(response).await.contains(&token()));
         }
+
         let oversized = router
             .handle(unlock_request(
                 "x".repeat(1025),
@@ -750,6 +756,7 @@ mod tests {
             ))
             .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
         let cookie = response.headers()["set-cookie"].to_str().unwrap();
         assert_eq!(
             cookie,
@@ -760,6 +767,7 @@ mod tests {
         );
         assert!(!cookie.contains(&token()));
         assert_eq!(response.headers()["cache-control"], "no-store");
+
         assert!(text(response).await.is_empty());
     }
 
@@ -767,6 +775,7 @@ mod tests {
     async fn unlock_rejects_missing_content_type_and_duplicate_origin() {
         let router = router();
         let body = serde_json::json!({"token":token()}).to_string();
+
         let mut missing_type = unlock_request(
             body.clone(),
             Some("http://localhost:3000"),
@@ -818,6 +827,7 @@ mod tests {
                 secure
             );
         }
+
         let router = router();
         let cookie = Access::for_test(token()).test_cookie();
         for separate_headers in [false, true] {
@@ -835,6 +845,7 @@ mod tests {
     #[tokio::test]
     async fn rate_limits_are_bounded_reusable_and_do_not_limit_authenticated_probes() {
         let router = router();
+
         for _ in 0..12 {
             assert_eq!(
                 router
@@ -872,6 +883,7 @@ mod tests {
             assert!(access.allow_attempt(Some(IpAddr::from([10, 0, 0, index]))));
         }
         assert!(!access.allow_attempt(Some(IpAddr::from([10, 0, 0, 121]))));
+
         {
             let mut attempts = access.attempts.lock().unwrap();
             attempts.global.started -= WINDOW;
@@ -879,6 +891,7 @@ mod tests {
                 window.started -= WINDOW;
             }
         }
+
         assert!(access.allow_attempt(None));
         assert_eq!(access.attempts.lock().unwrap().peers.len(), 1);
     }
@@ -890,10 +903,12 @@ mod tests {
         req.headers_mut()
             .insert("origin", "https://evil.test".parse().unwrap());
         assert_eq!(router.handle(req).await.status(), StatusCode::FORBIDDEN);
+
         let mut req = request("POST", "/_topcoat/procedures/unknown", true);
         req.headers_mut()
             .insert("sec-fetch-site", "cross-site".parse().unwrap());
         assert_eq!(router.handle(req).await.status(), StatusCode::FORBIDDEN);
+
         assert_eq!(
             router
                 .handle(request("POST", "/_topcoat/procedures/unknown", true))
@@ -907,18 +922,17 @@ mod tests {
     fn startup_is_persistent_atomic_and_rotation_invalidates_cookies() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("private/nested/access-token");
+
         let first = Access::load_file(&path).unwrap();
-        assert!(valid_token(&first.key.as_ref().unwrap().token));
-        assert_ne!(first.key.as_ref().unwrap().token, token());
+        let first_token = &first.key.as_ref().unwrap().token;
+        assert!(valid_token(first_token));
+        assert_ne!(first_token, &token());
+        assert_eq!(read_token(&path).unwrap(), *first_token);
+
         let second = Access::load_file(&path).unwrap();
-        assert_eq!(
-            first.key.as_ref().unwrap().token,
-            second.key.as_ref().unwrap().token
-        );
-        assert_eq!(
-            first.key.as_ref().unwrap().cookie,
-            second.key.as_ref().unwrap().cookie
-        );
+        assert_eq!(first_token, &second.key.as_ref().unwrap().token);
+        assert_eq!(first.test_cookie(), second.test_cookie());
+
         #[cfg(unix)]
         {
             assert_eq!(
@@ -942,11 +956,15 @@ mod tests {
                 0o700
             );
         }
+
         fs::write(&path, token()).unwrap();
         let rotated = Access::load_file(&path).unwrap();
+
         let mut headers = HeaderMap::new();
         headers.insert("cookie", first.test_cookie().parse().unwrap());
+        assert!(second.authenticated(&headers));
         assert!(!rotated.authenticated(&headers));
+
         headers.insert("cookie", rotated.test_cookie().parse().unwrap());
         assert!(rotated.authenticated(&headers));
     }
@@ -966,6 +984,7 @@ mod tests {
                 })
             })
             .collect();
+
         let tokens: Vec<_> = threads
             .into_iter()
             .map(|thread| thread.join().unwrap())
@@ -978,6 +997,7 @@ mod tests {
     fn malformed_unreadable_or_insecure_existing_files_are_never_rotated() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("token");
+
         for contents in [
             "bad".to_string(),
             "A".repeat(64),
@@ -990,6 +1010,7 @@ mod tests {
             assert!(Access::load_file(&path).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), contents);
         }
+
         #[cfg(unix)]
         {
             fs::write(&path, token()).unwrap();
@@ -1001,6 +1022,7 @@ mod tests {
                     mode
                 );
             }
+
             fs::remove_file(&path).unwrap();
             std::os::unix::fs::symlink(temp.path().join("missing"), &path).unwrap();
             assert!(Access::load_file(&path).is_err());
@@ -1012,6 +1034,7 @@ mod tests {
             );
             fs::remove_file(&path).unwrap();
         }
+
         fs::create_dir(&path).unwrap();
         assert!(Access::load_file(&path).is_err());
         assert!(path.is_dir());

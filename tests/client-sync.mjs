@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-// No package.json/module-type change is required for the browser's native ES modules.
 const source = await readFile(new URL('../assets/sync.js', import.meta.url), 'utf8');
 const {
   parseVideoId, parseRoomLink, validSnapshot, SnapshotOrder, ClockFilter,
   targetPosition, shouldSeek, reconnectDelay, visibleProblem, playbackUpdate, NativePlaybackObserver, supportedRate, avatarPattern,
 } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+
 const state = (overrides = {}) => {
   const snapshot = { incarnation: 'process-a', room_name: 'The Sleepy Observatory', events: [], revision: 3, media_revision: 0, playback_rate: 1, video_id: 'dQw4w9WgXcQ',
     playing: true, position_secs: 20, anchor_ms: 10000, members: 2, ...overrides };
@@ -23,15 +23,18 @@ test('avatars are deterministic, symmetric, non-empty, and use the Mocha palette
   assert.deepEqual(avatarPattern(seed), avatar);
   assert.match(avatar.color, /^#[0-9a-f]{6}$/);
   assert.ok(avatar.cells.length > 0);
+
   for (const [column, row] of avatar.cells) {
     assert.ok(avatar.cells.some(([otherColumn, otherRow]) => otherColumn === 4 - column && otherRow === row));
   }
+
   assert.ok(avatarPattern('0000000000000000').cells.length > 0);
   assert.notDeepEqual(avatarPattern('ffffffffffffffff'), avatar);
 });
 
 test('participant snapshots reject duplicate identities, malformed avatars and inconsistent counts', () => {
   assert.equal(validSnapshot(state()), true);
+
   for (const participants of [undefined, [], [{ id: 1, role: 'guest', avatar: 'bad' }],
     [{ id: 1, role: 'admin', avatar: '0123456789abcdef' }],
     [{ id: 1, role: 'guest', avatar: '0123456789abcdef' }, { id: 1, role: 'host', avatar: '0123456789abcdef' }]]) {
@@ -39,6 +42,7 @@ test('participant snapshots reject duplicate identities, malformed avatars and i
     snapshot.participants = participants;
     assert.equal(validSnapshot(snapshot), false);
   }
+
   assert.equal(validSnapshot(state({ members: 33 })), false);
 });
 
@@ -55,6 +59,7 @@ test('room names, participant names, moderator roles and retained event payloads
     { events: [{ ...entry, name: '' }] }, { events: Array(101).fill(entry) }]) {
     assert.equal(validSnapshot({ ...snapshot, ...overrides }), false);
   }
+
   snapshot.participants[1].name = '';
   assert.equal(validSnapshot(snapshot), false);
 });
@@ -116,6 +121,7 @@ test('snapshot ordering rejects rollback but permits membership-only updates', (
   assert.equal(order.accept(state(), 11000, true), true);
   assert.equal(order.accept(state({ members: 3 }), 11500), true);
   assert.equal(order.snapshot.members, 3);
+
   assert.equal(order.accept(state({ revision: 2 }), 12000), false);
   assert.equal(order.accept(state({ members: 1 }), 10000), false);
   assert.equal(order.accept(state({ revision: 4 }), 12000), true);
@@ -126,9 +132,11 @@ test('snapshot ordering rejects rollback but permits membership-only updates', (
 test('fresh welcome accepts a restarted process, revision and clock reset', () => {
   const order = new SnapshotOrder();
   order.accept(state({ revision: 100 }), 50000, true);
+
   const restarted = state({ incarnation: 'process-b', revision: 0, anchor_ms: 0 });
   assert.equal(order.accept(restarted, 100, true), true);
   assert.equal(order.accept(state({ revision: 101 }), 51000), false);
+
   order.reset();
   assert.equal(order.snapshot, null);
 });
@@ -144,10 +152,13 @@ test('clock uses the best recent RTT sample, not wall-clock time', () => {
   const clock = new ClockFilter();
   clock.seed(10000, 1000);
   assert.equal(clock.serverNow(1100), 10100);
-  clock.sample(1000, 1020, 11010); // +10000 ms offset, 20 ms RTT.
+
+  clock.sample(1000, 1020, 11010);
   assert.equal(clock.serverNow(1100), 11100);
-  clock.sample(1100, 1900, 11800); // Worse latency / asymmetric bias.
+
+  clock.sample(1100, 1900, 11800);
   assert.equal(clock.serverNow(2000), 12000);
+
   clock.sample(2100, 2110, 12105);
   assert.equal(clock.serverNow(2200), 12200);
 });
@@ -157,6 +168,7 @@ test('old clock samples eventually expire and reconnect resets mapping', () => {
   clock.sample(0, 2, 1001);
   for (let i = 0; i < 12; i++) clock.sample(100 + i * 100, 120 + i * 100, 2110 + i * 100);
   assert.equal(clock.offset, 2000);
+
   clock.reset();
   assert.equal(clock.offset, null);
   clock.seed(5, 1000);
@@ -208,8 +220,6 @@ test('room errors take precedence over local embed errors', () => {
   assert.equal(visibleProblem('', ''), '');
 });
 
-
-
 test('authoritative revision changes bypass drift cooldown, even for small explicit seeks', () => {
   const previous = state();
   const next = state({ revision: 4, position_secs: 21 });
@@ -248,6 +258,7 @@ test('observer settles asynchronous programmatic cue/seek/play without native ec
   assert.equal(observer.observe(30, 1, 200, true), null);
   assert.equal(observer.observe(30.3, 1, 500), null);
   assert.equal(observer.settling, false);
+
   const intent = observer.observe(50, 1, 800);
   assert.equal(intent.kind, 'seek');
   assert.equal(intent.position, 50);
@@ -295,7 +306,8 @@ test('state callbacks override stale getter caches; steady native pause is debou
   observer.observe(10, 1, 0);
   assert.equal(observer.observe(10, 2, 100, true), null);
   assert.equal(observer.waiting, true);
-  const pause = observer.observe(10, 1, 400); // Cache still reports playing.
+
+  const pause = observer.observe(10, 1, 400);
   assert.equal(pause.playing, false);
   assert.equal(pause.position, 10);
 });

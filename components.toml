@@ -1,4 +1,3 @@
-# Topcoat UI install state. Managed by `topcoat ui`.
 version = 1
 components_dir = "src/components"
 

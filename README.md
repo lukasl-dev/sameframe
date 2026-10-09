@@ -4,16 +4,19 @@ A lightweight, anonymous watch-together app built with
 [Topcoat](https://github.com/tokio-rs/topcoat), Rust, and Tokio. Catppuccin Mocha,
 dark-only, with a responsive interface and no client framework.
 
-## First slice
+## Watching together
 
 - Create a temporary room and share a guest invite link.
-- The creator loads videos and uses YouTube's native play/pause/seek/speed controls.
+- Keepers and Co-keepers load videos and control shared playback through YouTube's
+  native play/pause/seek/speed controls.
 - Volume and fullscreen use the native player controls and stay local.
-- Members have locally generated random avatars and anonymous host/guest labels.
+- Members get shared random names and avatars, and rooms have random names.
 - Guests follow the room's authoritative playback timeline. Personal playback
   changes can pause following; Rejoin playback returns to the shared timeline.
 - Full snapshots repair missed updates and reconnects; buffering is local.
-- No accounts, database, chat, or playlist yet.
+- Chat includes video suggestions and join/leave/playback activity.
+- Keepers can grant or revoke Co-keeper permissions.
+- No accounts, database, or playlist.
 
 Host access is a random capability, distinct from the room link. The initial
 host URL carries it in a fragment, which the browser removes immediately and
@@ -91,8 +94,7 @@ HOST=0.0.0.0 PORT=8080 topcoat dev
 ```
 
 The shell provides Rust, the Topcoat CLI, Tailwind CSS v4, rust-analyzer, Node.js,
-and jq. The Rust toolchain and Nix input pins match the reference `memexmd/www`
-setup. Topcoat UI and Tailwind are enabled; system fonts avoid another download.
+and jq. Pages use Topcoat UI and inline Tailwind classes, with system fonts.
 
 ## Architecture
 
@@ -111,12 +113,6 @@ setup. Topcoat UI and Tailwind are enabled; system fonts avoid another download.
   host actions become room commands; programmatic corrections, buffering, and
   autoplay rejection must not echo back into room commands.
 - `docs/protocol.md`: wire format and recovery rules.
-
-Topcoat's Rust-to-JavaScript runtime was considered. Its supported expression
-vocabulary does not directly cover YouTube or WebSocket APIs; those still need
-JavaScript interop. This slice keeps one small browser controller instead of
-adding a second reactive state system around it. The runtime remains an option
-for future UI where it actually simplifies the code.
 
 The browser uses YouTube's official iframe API, loaded only after a video is
 selected. Each viewer streams directly from YouTube; Sameframe does not proxy
@@ -146,14 +142,13 @@ The Crane build bundles CSS and browser modules alongside the server in
 `result/bin/assets`. Keep that directory with the binary when moving the build.
 This is a live HTTP server, not a static export.
 
-The flake supports Linux and macOS on x86_64 and aarch64. No workflows, secrets
-tooling, or deployment configuration are included. Until new files are added
-to Git, use `nix develop "path:$PWD"`, `nix build "path:$PWD"`, or
-`nix flake check "path:$PWD"` so Nix can see untracked source files.
+The flake supports Linux and macOS on x86_64 and aarch64. Nix flake builds include
+only Git-tracked files; add new source files to the index before building. Avoid
+`path:` builds of a working directory containing private token files.
 
 ## Operational limits
 
-This first version is a single-process service: 256 rooms, 32 connections per
+Sameframe is a single-process service: 256 rooms, 32 connections per
 room, 512 total WebSockets, and bounded command queues and deduplication history.
 Room creation is limited to eight requests per peer IP per minute. Behind a
 reverse proxy, peers may share the proxy's IP; trusted proxy configuration and

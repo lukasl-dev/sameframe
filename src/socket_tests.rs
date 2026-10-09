@@ -1,12 +1,9 @@
-//! Exercise real upgrades and multiple clients, not just the room state machine.
-
 use std::{net::SocketAddr, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::oneshot,
     task::JoinHandle,
     time::timeout,
 };
@@ -30,23 +27,25 @@ struct TestServer {
     rooms: Rooms,
     cookie: Option<String>,
     task: JoinHandle<()>,
-    _shutdown: oneshot::Sender<()>,
 }
 
 impl TestServer {
     async fn start() -> Self {
-        Self::start_with_access(Access::for_test("a".repeat(64)), false).await
+        Self::start_with_access(Some(Access::for_test("a".repeat(64)))).await
     }
 
-    async fn start_with_access(access: Access, public: bool) -> Self {
+    async fn start_with_access(access: Option<Access>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let rooms = Rooms::new();
-        let cookie = if public {
-            None
-        } else {
-            Some(access.test_cookie())
+        let (access, cookie) = match access {
+            Some(access) => {
+                let cookie = access.test_cookie();
+                (access, Some(cookie))
+            }
+            None => (Access::public(), None),
         };
+
         let router = Router::builder()
             .app_context(access)
             .origin_policy(OriginPolicy::dangerous_disable())
@@ -57,13 +56,11 @@ impl TestServer {
             .app_context(ConnectionLimits::new())
             .discover()
             .build();
-        let (shutdown, signal) = oneshot::channel();
+
         let task = tokio::spawn(async move {
-            topcoat::serve_until(listener, router, async {
-                let _ = signal.await;
-            })
-            .await
-            .unwrap();
+            topcoat::serve_until(listener, router, std::future::pending::<()>())
+                .await
+                .unwrap();
         });
 
         Self {
@@ -71,7 +68,6 @@ impl TestServer {
             rooms,
             cookie,
             task,
-            _shutdown: shutdown,
         }
     }
 
@@ -148,7 +144,7 @@ async fn ack(socket: &mut Socket, id: &str) -> Value {
 
 #[tokio::test]
 async fn public_websockets_need_no_site_key_but_guests_still_cannot_control_playback() {
-    let server = TestServer::start_with_access(Access::public(), true).await;
+    let server = TestServer::start_with_access(None).await;
     let created = server.rooms.create().unwrap();
     let mut guest = server.connect(&created.room_id).await;
 
@@ -329,7 +325,6 @@ async fn social_result(socket: &mut Socket, id: &str) -> Value {
 }
 
 async fn sync_snapshot(socket: &mut Socket) -> Value {
-    // A pong orders earlier responses before the subsequent fresh sync.
     send(socket, json!({ "type": "ping", "client_ms": 123.0 })).await;
     receive(socket, |message| message["type"] == "pong").await;
     send(socket, json!({ "type": "sync" })).await;
@@ -342,6 +337,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     let created = server.rooms.create().unwrap();
     let mut host = server.connect(&created.room_id).await;
     let host_welcome = join(&mut host, Some(&created.host_token)).await;
+
     let mut guest = server.connect(&created.room_id).await;
     let guest_welcome = join(&mut guest, None).await;
     let member_id = guest_welcome["member_id"].as_u64().unwrap();
@@ -354,6 +350,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
         author["name"],
         host_welcome["snapshot"]["participants"][0]["name"]
     );
+
     let initial = sync_snapshot(&mut host).await;
     assert_eq!(
         initial["participants"],
@@ -371,6 +368,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     assert_eq!(chat_ack["type"], "social_ack");
     assert_eq!(chat_ack.as_object().unwrap().len(), 3);
     let event_id = chat_ack["event_id"].as_u64().unwrap();
+
     let chat = sync_snapshot(&mut host).await;
     let entry = chat["events"].as_array().unwrap().last().unwrap();
     assert_eq!(entry.as_object().unwrap().len(), 9);
@@ -378,10 +376,12 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     assert_eq!(entry["member_id"], member_id);
     assert_eq!(entry["name"], author["name"]);
     assert_eq!(entry["avatar"], author["avatar"]);
+
     assert_eq!(entry["kind"], "message");
     assert_eq!(entry["text"], "hello <b>room</b>");
     assert_eq!(entry["video_id"], Value::Null);
     assert_eq!(entry["position_secs"], Value::Null);
+
     assert_eq!(chat["revision"], initial["revision"]);
     assert_eq!(chat["anchor_ms"], initial["anchor_ms"]);
 
@@ -393,6 +393,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     .await;
     assert_eq!(social_result(&mut guest, "chat").await, chat_ack);
     assert_eq!(sync_snapshot(&mut host).await, chat);
+
     social(
         &mut guest,
         "chat",
@@ -421,6 +422,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     assert_eq!(proposal["avatar"], author["avatar"]);
     assert_eq!(proposal["video_id"], "dQw4w9WgXcQ");
     assert_eq!(proposal["text"], Value::Null);
+
     assert_eq!(proposed["video_id"], Value::Null);
     assert_eq!(proposed["revision"], 0);
     assert_eq!(proposed["media_revision"], 0);
@@ -431,6 +433,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     let denied = social_result(&mut guest, "grant").await;
     assert_eq!(denied["type"], "error");
     assert_eq!(denied["code"], "forbidden");
+
     social(&mut host, "grant", grant.clone()).await;
     assert_eq!(
         social_result(&mut host, "grant").await["type"],
@@ -441,6 +444,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     assert_eq!(granted["revision"], 0);
     assert_eq!(granted["anchor_ms"], initial["anchor_ms"]);
     assert_eq!(granted["room_name"], room_name);
+
     social(&mut guest, "grant", grant).await;
     assert_eq!(
         social_result(&mut guest, "grant").await["code"],
@@ -480,6 +484,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     assert_eq!(revoked["revision"], loaded["revision"]);
     assert_eq!(revoked["media_revision"], loaded["media_revision"]);
     assert_eq!(revoked["anchor_ms"], loaded["anchor_ms"]);
+
     command(
         &mut guest,
         "load",
@@ -514,6 +519,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
             .any(|event| event["id"] == event_id)
     );
     assert_eq!(departed["snapshot"]["room_name"], room_name);
+
     host.close(None).await.unwrap();
 }
 
@@ -525,7 +531,6 @@ async fn escaped_chat_fits_the_bounded_transport_and_social_errors_never_ack_pla
     join(&mut guest, None).await;
     let before = sync_snapshot(&mut guest).await;
 
-    // Five hundred escaped control characters need more than the old 2048-byte cap.
     let text = "\u{0001}".repeat(500);
     let wire =
         json!({ "type": "social", "id": "escaped", "action": { "type": "message", "text": text } });
@@ -574,6 +579,7 @@ async fn escaped_chat_fits_the_bounded_transport_and_social_errors_never_ack_pla
     assert_eq!(malformed["code"], "invalid_command");
     assert_eq!(malformed["id"], Value::Null);
     assert_eq!(sync_snapshot(&mut guest).await, accepted);
+
     guest.close(None).await.unwrap();
 }
 
@@ -582,12 +588,11 @@ async fn full_escaped_and_nonascii_history_reaches_welcome_live_updates_and_sync
     let server = TestServer::start().await;
     let created = server.rooms.create().unwrap();
     let room = server.rooms.get(&created.room_id).unwrap();
+
     let mut authors = Vec::new();
     let text = format!("{}{}", "\u{0001}".repeat(400), "😀".repeat(100));
     assert_eq!(text.chars().count(), 500);
 
-    // Separate memberships stay within the existing 20-command burst without
-    // sleeping or loosening production rate limits to fill the retained tail.
     for author_index in 0..5 {
         let author = room.join(None).await.unwrap();
         for message_index in 0..20 {
@@ -601,8 +606,10 @@ async fn full_escaped_and_nonascii_history_reaches_welcome_live_updates_and_sync
         }
         authors.push(author);
     }
+
     let expected_before_join = authors[0].snapshots.borrow().clone();
     assert_eq!(expected_before_join.events.len(), 100);
+
     let encoded_len = serde_json::to_string(&expected_before_join).unwrap().len();
     assert!(encoded_len > 250_000);
     assert!(encoded_len < 1024 * 1024);
@@ -651,6 +658,7 @@ async fn full_escaped_and_nonascii_history_reaches_welcome_live_updates_and_sync
     assert_eq!(latest["media_revision"], 0);
 
     assert_eq!(sync_snapshot(&mut guest).await, latest);
+
     guest.close(None).await.unwrap();
 }
 
@@ -670,6 +678,7 @@ async fn invalid_tokens_and_unknown_rooms_are_explicit() {
     let mut missing = server.connect("missing").await;
     let error = receive(&mut missing, |message| message["type"] == "error").await;
     assert_eq!(error["code"], "unavailable");
+
     let close = timeout(Duration::from_secs(5), missing.next())
         .await
         .unwrap()
@@ -701,6 +710,7 @@ async fn cross_origin_socket_upgrade_is_rejected() {
 async fn raw_upgrades_without_cookie_are_rejected_before_room_lookup_even_with_url_token() {
     let server = TestServer::start().await;
     let created = server.rooms.create().unwrap();
+
     for room in [created.room_id.as_str(), "missing"] {
         for query in [String::new(), format!("?access_token={}", "a".repeat(64))] {
             let mut request = format!("ws://{}/api/rooms/{room}/ws{query}", server.address)
@@ -721,7 +731,7 @@ async fn raw_upgrades_without_cookie_are_rejected_before_room_lookup_even_with_u
             assert!(!String::from_utf8_lossy(body).contains(&"a".repeat(64)));
         }
     }
-    // Site admission does not grant any room or host authority.
+
     let mut guest = server.connect(&created.room_id).await;
     assert_eq!(join(&mut guest, None).await["role"], "guest");
     guest.close(None).await.unwrap();
@@ -733,6 +743,7 @@ async fn malformed_and_oversized_messages_cannot_mutate_a_room() {
     let created = server.rooms.create().unwrap();
     let mut socket = server.connect(&created.room_id).await;
     join(&mut socket, None).await;
+
     send(&mut socket, json!({ "type": "command", "id": "malformed" })).await;
     let error = receive(&mut socket, |message| message["type"] == "error").await;
     assert_eq!(error["code"], "invalid_command");
@@ -747,5 +758,6 @@ async fn malformed_and_oversized_messages_cannot_mutate_a_room() {
     let welcome = join(&mut guest, None).await;
     assert_eq!(welcome["snapshot"]["revision"], 0);
     assert_eq!(welcome["snapshot"]["video_id"], Value::Null);
+
     guest.close(None).await.unwrap();
 }

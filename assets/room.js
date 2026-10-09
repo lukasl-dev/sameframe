@@ -5,12 +5,13 @@ const text = (id, value) => {
   node.textContent = value;
   if (['room-error', 'room-notice', 'chat-error'].includes(id)) node.hidden = !value;
 };
+
 const roomId = document.body.dataset.roomId;
 const roomPath = `/room/${encodeURIComponent(roomId ?? '')}`;
 const shareUrl = `${location.origin}${roomPath}`;
 const tokenKey = `sameframe:host:${roomId}`;
 let hostToken = null;
-// Strip the secret and irrelevant query before loading any third-party resource.
+
 const fragmentToken = new URLSearchParams(location.hash.slice(1)).get('host');
 if (location.hash || location.search || location.pathname !== roomPath) history.replaceState(null, '', roomPath);
 try {
@@ -21,6 +22,7 @@ try {
 const helpers = await import(document.body.dataset.syncUrl).catch(() => {
   text('room-error', 'The room client could not load. Reload this page to retry.');
   text('connection-status', 'Client unavailable');
+
   for (const id of ['video-url', 'load-video', 'chat-message', 'send-message', 'join-playback', 'reconnect-button']) {
     if (element(id)) element(id).disabled = true;
   }
@@ -28,6 +30,7 @@ const helpers = await import(document.body.dataset.syncUrl).catch(() => {
   element('chat-form')?.addEventListener('submit', (event) => event.preventDefault());
   return null;
 });
+
 if (helpers) {
   const {
     ClockFilter, SnapshotOrder, NativePlaybackObserver, targetPosition, shouldSeek,
@@ -37,6 +40,7 @@ if (helpers) {
   const ordering = new SnapshotOrder();
   const native = new NativePlaybackObserver();
   const pings = new Set();
+
   let socket = null;
   let connected = false;
   let terminal = false;
@@ -44,19 +48,23 @@ if (helpers) {
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let joinTimer = null;
+
   let pending = null;
   let pendingTimer = null;
-  let latestIntent = null; // At most ONE latest native intention while a command is in flight.
+  let latestIntent = null;
   let awaitingSync = false;
+
   let role = 'guest';
   let memberId = null;
   let membersSignature = '';
   let feedSignature = '';
   let feedIncarnation = null;
   const feedNodes = new Map();
+
   let socialPending = null;
   let socialTimer = null;
   let chatError = '';
+
   let snapshot = null;
   let lastResponseMs = 0;
   let roomError = '';
@@ -159,7 +167,8 @@ if (helpers) {
   function renderFeed() {
     const feed = element('chat-feed');
     if (!feed || !snapshot) return;
-    const events = snapshot.events ?? [];
+
+    const events = snapshot.events;
     const signature = JSON.stringify([snapshot.incarnation, events]);
     const reset = feedIncarnation !== snapshot.incarnation;
     if (reset) {
@@ -167,6 +176,7 @@ if (helpers) {
       feed.replaceChildren();
       feedIncarnation = snapshot.incarnation;
     }
+
     if (signature !== feedSignature) {
       const nearBottom = reset || feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
       const previousHeight = feed.scrollHeight;
@@ -175,7 +185,7 @@ if (helpers) {
       for (const [id, node] of feedNodes) {
         if (!retained.has(id)) { node.remove?.(); feedNodes.delete(id); }
       }
-      // Account for history pruned above the viewport without moving the reader.
+
       if (!nearBottom) feed.scrollTop = Math.max(0, previousTop - (previousHeight - feed.scrollHeight));
       for (const entry of events) {
         if (feedNodes.has(entry.id)) continue;
@@ -183,25 +193,38 @@ if (helpers) {
         feedNodes.set(entry.id, node);
         feed.append(node);
       }
+
       feedSignature = signature;
-      if (nearBottom) { feed.scrollTop = feed.scrollHeight; if (element('chat-unread')) element('chat-unread').hidden = true; }
-      else if (element('chat-unread')) element('chat-unread').hidden = false;
+      if (nearBottom) feed.scrollTop = feed.scrollHeight;
+      const unread = element('chat-unread');
+      if (unread) unread.hidden = nearBottom;
     }
+
+    const controlsAllowed = canControl();
     for (const node of feedNodes.values()) {
       if (!node.proposal) continue;
-      node.proposal.button.hidden = !canControl();
-      node.proposal.hint.hidden = canControl();
+      node.proposal.button.hidden = !controlsAllowed;
+      node.proposal.hint.hidden = controlsAllowed;
       node.proposal.button.disabled = !connected || !!pending || awaitingSync;
     }
   }
 
-  function clearSocial() { socialPending = null; clearTimeout(socialTimer); }
+  function clearSocial() {
+    socialPending = null;
+    clearTimeout(socialTimer);
+  }
+
   function social(action, inputId = null) {
     if (!connected || socialPending) return false;
+
     const id = globalThis.crypto?.randomUUID?.() ?? `${performance.now()}-${Math.random().toString(36).slice(2)}`;
     socialPending = { id, inputId, value: inputId ? element(inputId)?.value : null };
     chatError = '';
-    if (!send({ type: 'social', id, action })) { clearSocial(); return false; }
+    if (!send({ type: 'social', id, action })) {
+      clearSocial();
+      return false;
+    }
+
     socialTimer = setTimeout(() => {
       chatError = 'Not confirmed. Your text is saved here; check the chat before sending again.';
       clearSocial();
@@ -240,26 +263,27 @@ if (helpers) {
       const item = document.createElement('li');
       item.className = 'flex min-w-0 items-center gap-2 rounded-[10px] border border-border bg-card px-2.5 py-2';
       item.dataset.role = member.role;
-      const name = member.name;
-      item.title = `${name} · ${roleName(member.role)}`;
+      item.title = `${member.name} · ${roleName(member.role)}`;
+
       const info = document.createElement('div');
       info.className = 'flex flex-col leading-normal';
       const label = document.createElement('span');
       label.className = 'text-xs text-foreground';
-      label.textContent = connected && member.id === memberId ? `${name} (you)` : name;
+      label.textContent = connected && member.id === memberId ? `${member.name} (you)` : member.name;
       const badge = document.createElement('span');
       badge.className = member.role === 'host' ? 'text-[10px] text-primary'
         : member.role === 'moderator' ? 'text-[10px] text-[#94e2d5]' : 'text-[10px] text-muted-foreground';
       badge.textContent = roleName(member.role);
       info.append(label, badge);
       item.append(avatar(member.avatar, 'size-[30px] shrink-0 rounded-full'), info);
+
       if (role === 'host' && member.role !== 'host') {
         const manage = document.createElement('button');
         const enabled = member.role !== 'moderator';
         manage.type = 'button';
         manage.className = 'grid h-8 w-[30px] place-items-center rounded-md border-0 bg-transparent text-lg text-muted-foreground hover:bg-popover hover:text-primary';
         manage.textContent = enabled ? '+' : '−';
-        manage.title = `${enabled ? 'Make' : 'Remove'} ${name} ${enabled ? 'a Co-keeper' : 'as Co-keeper'}`;
+        manage.title = `${enabled ? 'Make' : 'Remove'} ${member.name} ${enabled ? 'a Co-keeper' : 'as Co-keeper'}`;
         manage.setAttribute?.('aria-label', manage.title);
         manage.disabled = !connected || !!socialPending;
         manage.addEventListener?.('click', () => social({ type: 'set_moderator', member_id: member.id, enabled }));
@@ -273,6 +297,7 @@ if (helpers) {
   function render() {
     renderMembers();
     renderFeed();
+
     text('connection-status', connection);
     if (element('connection-status')) element('connection-status').dataset.state = connected ? 'connected' : 'disconnected';
     text('role-label', connected ? `You’re a ${roleName(role)}` : 'Not connected');
@@ -287,15 +312,18 @@ if (helpers) {
     text('playback-help', snapshot?.video_id
       ? 'Keeper and Co-keeper player controls apply to everyone. Companions can suggest a video.'
       : 'Load a video to get started.');
+
     if (element('guest-note')) element('guest-note').hidden = !connected || role !== 'guest';
     for (const id of ['video-url', 'load-video']) {
       if (element(id)) element(id).disabled = !connected || !!pending || awaitingSync || !!socialPending;
     }
     text('load-video', canControl() ? 'Watch' : 'Suggest');
+
     text('chat-error', chatError);
     for (const id of ['chat-message', 'send-message']) {
       if (element(id)) element(id).disabled = !connected || !!socialPending;
     }
+
     if (element('join-playback')) {
       element('join-playback').hidden = terminal || (!detached && !autoplayBlocked && !playerError);
       element('join-playback').textContent = playerError ? 'Retry playback on this device'
@@ -314,8 +342,20 @@ if (helpers) {
     socket.send(JSON.stringify(message));
     return true;
   }
-  function clearPending() { pending = null; clearTimeout(pendingTimer); }
-  function discardIntents() { clearPending(); latestIntent = null; native.reset(); rateGuard = null; rateEvent = null; }
+
+  function clearPending() {
+    pending = null;
+    clearTimeout(pendingTimer);
+  }
+
+  function discardIntents() {
+    clearPending();
+    latestIntent = null;
+    native.reset();
+    rateGuard = null;
+    rateEvent = null;
+  }
+
   function ping() {
     if (!connected) return;
     const clientMs = performance.now();
@@ -323,13 +363,19 @@ if (helpers) {
     pings.add(clientMs);
     send({ type: 'ping', client_ms: clientMs });
   }
+
   function recover() {
     if (!connected) return;
-    if (performance.now() - lastResponseMs > 30000) { socket?.close(); return; }
+    if (performance.now() - lastResponseMs > 30000) {
+      socket?.close();
+      return;
+    }
+
     ping();
     send({ type: 'sync' });
     updatePlayer();
   }
+
   function stopUnavailable(message) {
     terminal = true;
     connected = false;
@@ -338,12 +384,14 @@ if (helpers) {
     clearTimeout(autoplayTimer);
     clearTimeout(playerReadyTimer);
     ++playerGeneration;
+
     buffering = false;
     detached = false;
     autoplayBlocked = false;
     notice = '';
     discardIntents();
     clearSocial();
+
     connection = 'Room unavailable';
     roomError = message || 'This room has expired or is no longer available. Create a new room to keep watching.';
     socket?.close();
@@ -355,19 +403,23 @@ if (helpers) {
     if (terminal) return;
     clearTimeout(reconnectTimer);
     clearTimeout(joinTimer);
+
     const previous = socket;
-    socket = null; // Invalidate old callbacks before closing its server lease.
+    socket = null;
     previous?.close();
+
     connected = false;
     awaitingSync = true;
     detached = false;
-    discardIntents(); // No command or native intention crosses a connection.
+    discardIntents();
     clearSocial();
     pings.clear();
     clock.reset();
     ordering.reset();
+
     connection = reconnectAttempt ? 'Reconnecting…' : 'Connecting…';
     render();
+
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/rooms/${encodeURIComponent(roomId)}/ws`);
     socket = ws;
     joinTimer = setTimeout(() => { if (socket === ws) ws.close(); }, 10000);
@@ -386,7 +438,6 @@ if (helpers) {
         if (!ordering.accept(message.snapshot, message.server_ms, welcome)) return;
         const previousSnapshot = snapshot;
         const update = playbackUpdate(snapshot, message.snapshot);
-        const changedMedia = update.resetVideo;
         if (welcome) {
           clearTimeout(joinTimer);
           connected = true;
@@ -397,6 +448,7 @@ if (helpers) {
           roomError = '';
           if (!autoplayBlocked) notice = '';
         }
+
         snapshot = message.snapshot;
         const previousRole = role;
         role = snapshot.participants.find((member) => member.id === memberId)?.role ?? role;
@@ -405,6 +457,7 @@ if (helpers) {
           detached = false;
           forceSeek = true;
         }
+
         if (pending && !pending.native && pending.action.type === 'set_video') {
           pending.mediaAccepted = snapshot.incarnation === pending.incarnation
             && snapshot.media_revision > pending.mediaRevision && snapshot.video_id === pending.action.video_id;
@@ -413,7 +466,8 @@ if (helpers) {
         recoverySeek ||= welcome;
         clock.seed(message.server_ms, performance.now());
         awaitingSync = false;
-        if (changedMedia) {
+
+        if (update.resetVideo) {
           if (pending?.native) clearPending();
           latestIntent = null;
           native.reset();
@@ -427,10 +481,11 @@ if (helpers) {
           detached = false;
           lastSeekMs = -Infinity;
         }
+
         if (pending?.ackRevision != null && snapshot.revision >= pending.ackRevision) clearPending();
         if (welcome) ping();
         ensurePlayer();
-        updatePlayer(); // Observe/coalesce native input BEFORE applying the room snapshot.
+        updatePlayer();
         render();
       } else if (message.type === 'social_ack') {
         if (message.id !== socialPending?.id) return;
@@ -467,7 +522,6 @@ if (helpers) {
         if (message.id && message.id !== pending?.id) return;
         if (message.id) discardIntents();
         roomError = typeof message.message === 'string' ? message.message : 'The room could not accept that action.';
-        // A denied action doesn't prove a role change; only snapshots do.
         if (message.code === 'stale_revision') {
           awaitingSync = true;
           send({ type: 'sync' });
@@ -475,6 +529,7 @@ if (helpers) {
         render();
       }
     });
+
     ws.addEventListener('close', (event) => {
       if (socket !== ws) return;
       clearTimeout(joinTimer);
@@ -492,11 +547,16 @@ if (helpers) {
 
   function command(action, intention = null) {
     if (!connected || !canControl() || !snapshot || pending || awaitingSync) return false;
+
     const id = globalThis.crypto?.randomUUID?.() ?? `${performance.now()}-${Math.random().toString(36).slice(2)}`;
     pending = { id, ackRevision: null, native: intention !== null, action, intention, mediaAccepted: false,
       mediaRevision: snapshot.media_revision, incarnation: snapshot.incarnation };
     roomError = '';
-    if (!send({ type: 'command', id, revision: snapshot.revision, action })) { clearPending(); return false; }
+    if (!send({ type: 'command', id, revision: snapshot.revision, action })) {
+      clearPending();
+      return false;
+    }
+
     pendingTimer = setTimeout(() => {
       roomError = 'The command was not confirmed. Reconnecting for fresh room state.';
       socket?.close();
@@ -504,16 +564,26 @@ if (helpers) {
     render();
     return true;
   }
+
   function flushIntent() {
     if (!latestIntent || pending || awaitingSync || !connected || !canControl() || playerError || !playerReady) return;
     const intent = latestIntent;
-    if (intent.incarnation !== snapshot.incarnation || intent.videoId !== snapshot.video_id || intent.mediaRevision !== snapshot.media_revision) { latestIntent = null; return; }
-    // Unified play/pause-with-position preserves the newest scrub AND playing intent.
+    if (intent.incarnation !== snapshot.incarnation || intent.videoId !== snapshot.video_id
+      || intent.mediaRevision !== snapshot.media_revision) {
+      latestIntent = null;
+      return;
+    }
+
     if (snapshot.playback_rate !== intent.rate) {
       command({ type: 'set_rate', playback_rate: intent.rate }, intent);
-      return; // Keep the latest combined intention until its rate is authoritative.
+      return;
     }
-    if (!intent.needsPlayback) { latestIntent = null; return; }
+
+    if (!intent.needsPlayback) {
+      latestIntent = null;
+      return;
+    }
+
     const advance = intent.playing && !buffering ? Math.max(0, performance.now() - intent.at) / 1000 * intent.observedRate : 0;
     const position = Math.min(player.getDuration() || Infinity, Math.max(0, intent.position + advance));
     if (command({ type: intent.playing ? 'play' : 'pause', position_secs: position }, intent)) latestIntent = null;
@@ -540,12 +610,14 @@ if (helpers) {
     }).catch((error) => { apiPromise = null; throw error; });
     return apiPromise;
   }
+
   function resetPlayer() {
     ++playerGeneration;
     clearTimeout(playerReadyTimer);
     clearTimeout(autoplayTimer);
     playerReadyTimer = null;
     autoplayTimer = null;
+
     const previous = player;
     player = null;
     playerReady = false;
@@ -559,7 +631,8 @@ if (helpers) {
     forceSeek = false;
     recoverySeek = false;
     lastSeekMs = -Infinity;
-    try { previous?.destroy(); } catch { /* The iframe may already have been removed. */ }
+
+    try { previous?.destroy(); } catch {}
     const mount = element('player-mount');
     if (!mount || mount.tagName !== 'DIV') {
       const replacement = document.createElement('div');
@@ -568,6 +641,7 @@ if (helpers) {
       else playerMountParent?.append(replacement);
     }
   }
+
   async function ensurePlayer() {
     if (!snapshot?.video_id || loadingPlayer || player || playerError) return;
     loadingPlayer = true;
@@ -636,15 +710,17 @@ if (helpers) {
       notice = '';
     } finally { loadingPlayer = false; render(); }
   }
+
   function applyRate() {
     const rate = supportedRate(snapshot.playback_rate, player.getAvailablePlaybackRates?.());
-    if (rate === null) return; // The iframe has not reported its supported rates yet.
+    if (rate === null) return;
     if (rate !== snapshot.playback_rate) notice = `This video cannot use the room’s speed. Following at ${rate}× on this device.`;
     if (rateGuard?.rate === rate || (!rateGuard && player.getPlaybackRate?.() === rate)) return;
     rateGuard = { rate, until: performance.now() + 4000, settledAt: null };
     localRate = rate;
-    player.setPlaybackRate(rate); // Supported values only, and guard BEFORE the async write.
+    player.setPlaybackRate(rate);
   }
+
   function observeRate(eventRate) {
     const now = performance.now();
     let rate = eventRate ?? player.getPlaybackRate?.();
@@ -654,16 +730,19 @@ if (helpers) {
       if (rate === rateEvent.rate || now - rateEvent.at >= 750) rateEvent = null;
       else rate = rateEvent.rate;
     }
+
     if (rateGuard) {
       if (rate === rateGuard.rate) rateGuard.settledAt ??= now;
       if (rateGuard.settledAt !== null && now - rateGuard.settledAt >= 250) rateGuard = null;
       else if (now >= rateGuard.until) { rateGuard = null; localRate = rate; return false; }
       else return false;
     }
+
     const changed = rate !== localRate;
     localRate = rate;
     return changed;
   }
+
   function recordIntent(intent) {
     if (canControl()) {
       const previous = latestIntent;
@@ -676,16 +755,17 @@ if (helpers) {
     autoplayBlocked = false;
     render();
   }
+
   function markAutoplayBlocked() {
     clearTimeout(autoplayTimer);
     autoplayTimer = null;
     autoplayBlocked = true;
     native.reset();
-    // Establish a paused baseline so a later native Play is a local join gesture.
     if (playerReady) native.observe(player.getCurrentTime(), YT.PlayerState.PAUSED, performance.now(), false, localRate);
     notice = 'Your browser needs a tap to start audio. Join playback on this device.';
     render();
   }
+
   function watchAutoplay() {
     clearTimeout(autoplayTimer);
     autoplayTimer = setTimeout(() => {
@@ -696,9 +776,9 @@ if (helpers) {
 
   function observeNative(eventState, eventRate) {
     if (!connected || !playerReady || !snapshot?.video_id || playerError || document.hidden) return;
-    // Do not attribute delayed old-video callbacks to the newly selected media.
     if (loadedVideo !== snapshot.video_id || player.getVideoData?.()?.video_id !== snapshot.video_id) return;
     if (pending && !pending.native && !pending.mediaAccepted) return;
+
     const blocked = autoplayBlocked;
     const changedRate = observeRate(eventRate);
     const intent = native.observe(player.getCurrentTime(), eventState ?? player.getPlayerState(), performance.now(), eventState !== undefined, localRate);
@@ -707,6 +787,7 @@ if (helpers) {
       clearTimeout(autoplayTimer);
       autoplayTimer = null;
     }
+
     if (intent) {
       if (blocked && intent.playing && intent.kind === 'state') { rejoin(); return; }
       recordIntent(intent);
@@ -714,14 +795,14 @@ if (helpers) {
     if (changedRate) recordIntent({ playing: native.playing ?? snapshot.playing, position: player.getCurrentTime(),
       at: performance.now(), kind: 'rate' });
   }
+
   function updatePlayer(eventState, eventRate) {
     if (!connected || !playerReady || document.hidden) return;
     try {
-      observeNative(eventState, eventRate); // MUST precede drift correction, even on snapshot/pong.
+      observeNative(eventState, eventRate);
       flushIntent();
       reconcile();
     } catch (error) {
-      // Never log the player/socket objects or a URL carrying host credentials.
       let cause = String(error?.message ?? error);
       if (hostToken) cause = cause.split(hostToken).join('[redacted]');
       cause = cause.replace(/([#?&]host=)[^\s&]+/g, '$1[redacted]');
@@ -730,9 +811,11 @@ if (helpers) {
       render();
     }
   }
+
   function reconcile() {
     if (!snapshot?.video_id || !playerReady || playerError || awaitingSync || detached) return;
-    if (pending?.native || latestIntent || native.waiting) return; // Keep newest native state until acknowledged.
+    if (pending?.native || latestIntent || native.waiting) return;
+
     const now = performance.now();
     const newVideo = loadedVideo !== snapshot.video_id;
     if (!newVideo) applyRate();
@@ -743,19 +826,15 @@ if (helpers) {
     const seek = !newVideo && shouldSeek(player.getCurrentTime(), target, now, lastSeekMs, forceSeek, buffering, recoverySeek);
     const play = snapshot.playing && !autoplayBlocked && !buffering && state !== YT.PlayerState.PLAYING
       && (state !== YT.PlayerState.ENDED || target < (player.getDuration() || Infinity) - 1);
-    // Native Play goes BUFFERING -> PLAYING. An unchanged paused snapshot must
-    // not cancel that transition; only a fresh authoritative revision may do so.
     const pause = !snapshot.playing && (state === YT.PlayerState.PLAYING
       || (state === YT.PlayerState.BUFFERING && forceSeek));
     forceSeek = false;
     recoverySeek = false;
     if (!newVideo && !seek && !play && !pause) return;
-    // Register expected state/position BEFORE any async iframe operation.
+
     native.suppress(snapshot.playing, newVideo || seek ? target : null, now, localRate);
     if (newVideo) {
       loadedVideo = snapshot.video_id;
-      // The empty bootstrap iframe cannot safely play before its async cue lands.
-      // Load both the video ID and playing position in one YouTube operation.
       if (snapshot.playing && !autoplayBlocked) {
         player.loadVideoById({ videoId: loadedVideo, startSeconds: target });
         watchAutoplay();
@@ -763,15 +842,20 @@ if (helpers) {
         player.cueVideoById({ videoId: loadedVideo, startSeconds: target });
         player.pauseVideo();
       }
-      applyRate(); // onReady may have had no rates until media caches populate.
+      applyRate();
       lastSeekMs = now;
       return;
     }
-    if (seek) { player.seekTo(target, true); lastSeekMs = now; }
+
+    if (seek) {
+      player.seekTo(target, true);
+      lastSeekMs = now;
+    }
     if (snapshot.playing && !autoplayBlocked) {
       if (seek || play) { player.playVideo(); watchAutoplay(); }
     } else if (seek || pause) player.pauseVideo();
   }
+
   function rejoin() {
     if (!connected || !snapshot?.video_id) return;
     detached = false;
@@ -783,7 +867,7 @@ if (helpers) {
       native.reset();
     }
     if (!playerReady) { ensurePlayer(); render(); return; }
-    // Perform the local recovery within the native/button user gesture.
+
     const newVideo = loadedVideo !== snapshot.video_id;
     const target = targetPosition(snapshot, clock.serverNow(performance.now()), newVideo ? Infinity : player.getDuration());
     native.suppress(snapshot.playing, target, performance.now(), localRate);
@@ -837,18 +921,21 @@ if (helpers) {
     if (!playerReady && snapshot?.video_id) { playerError = ''; ensurePlayer(); }
     connect();
   });
+
   let copyTimer = null;
   let copyAttempt = 0;
+
   function copyFeedback(copied, feedback, title) {
     element('copy-icon')?.toggleAttribute('hidden', copied);
     element('copy-success')?.toggleAttribute('hidden', !copied);
     if (element('copy-link')) element('copy-link').title = title;
     text('copy-feedback', feedback);
   }
+
   element('copy-link')?.addEventListener('click', async () => {
     const attempt = ++copyAttempt;
     clearTimeout(copyTimer);
-    text('copy-feedback', ''); // Re-announce repeated clicks without a visible banner.
+    text('copy-feedback', '');
     try {
       await navigator.clipboard.writeText(shareUrl);
       if (attempt !== copyAttempt) return;
@@ -859,8 +946,9 @@ if (helpers) {
       copyFeedback(false, 'Copy URL from address bar', 'Copy URL from address bar');
     }
   });
+
   document.addEventListener('visibilitychange', () => {
-    native.reset(); // A suspended tab's sampling gap is not a native scrub.
+    native.reset();
     recoverySeek = true;
     recover();
   });
@@ -868,8 +956,10 @@ if (helpers) {
     if (connected) recover();
     else if (!terminal && socket?.readyState !== WebSocket.CONNECTING) connect();
   });
+
   setInterval(() => { if (!document.hidden) recover(); }, 10000);
   setInterval(() => { if (!document.hidden) updatePlayer(); }, 300);
+
   render();
   if (/^[A-Za-z0-9_-]+$/.test(roomId ?? '')) connect();
   else stopUnavailable();

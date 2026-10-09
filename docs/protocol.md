@@ -1,8 +1,8 @@
-# First slice: room protocol
+# Room protocol
 
 Rooms are ephemeral; hosts and host-appointed moderators control playback. Guests
-follow the room; a stalled guest
-never pauses the room. All browser traffic is same-origin. No accounts or DB.
+follow the room; a stalled guest never pauses the room. All browser traffic is
+same-origin. No accounts or database.
 
 ## Site admission
 
@@ -82,8 +82,9 @@ invalid token is rejected, not silently downgraded. Server sends:
 `member_id` identifies this connection in the public participant list. Each
 participant has a server-assigned two-word funny name, unique within the room,
 and a public random avatar seed, both fixed for that connection's lifetime.
-`room_name` is a random cozy title assigned once, stable for the room's lifetime. Avatars are generated locally, with no third-party requests. A
-reconnect creates a new anonymous membership; no persistent identity is implied.
+`room_name` is a random cosy title assigned once, stable for the room's lifetime.
+Avatars are generated locally, with no third-party requests. A reconnect creates
+a new anonymous membership; no persistent identity is implied.
 Presence updates include the full participant list without changing playback
 revision or anchor. Host tokens never appear in participant data.
 

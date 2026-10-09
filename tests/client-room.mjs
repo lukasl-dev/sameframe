@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+
 const helperSource = await readFile(new URL('../assets/sync.js', import.meta.url), 'utf8');
 const sync = await import(`data:text/javascript;base64,${Buffer.from(helperSource).toString('base64')}`);
 const roomSource = (await readFile(new URL('../assets/room.js', import.meta.url), 'utf8'))
   .replace('import(document.body.dataset.syncUrl)', 'Promise.resolve(sync)');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const id = 'dQw4w9WgXcQ';
+
 const initial = (overrides = {}) => {
   const snapshot = { incarnation: 'a', room_name: 'The Sleepy Observatory', events: [], revision: 0, media_revision: 0, playback_rate: 1,
     video_id: null, playing: false, position_secs: 0, anchor_ms: 1000, members: 1, ...overrides };
@@ -16,25 +18,27 @@ const initial = (overrides = {}) => {
   return snapshot;
 };
 
-// All programmatic iframe writes are asynchronous; getters remain cached until deliver().
 async function browser({ token = null, api = true, storageBlocked = false, importFailure = false,
   clipboardBlocked = false, query = '', pathname = '/room/test-room', rates = [0.5, 1, 1.5, 2],
   unavailableInitialCaches = false } = {}) {
   let now = 1000;
-  let copied = null;
   let timerId = 0;
-  let commandId = 0;
   const timers = new Map();
   const intervals = [];
+
   const nodes = new Map();
-  const stored = new Map();
-  const historyCalls = [];
+  const writes = [];
   const documentEvents = new Map();
   const windowEvents = new Map();
+
+  let copied = null;
+  const stored = new Map();
+  const historyCalls = [];
+  const warnings = [];
+
+  let commandId = 0;
   const sockets = [];
   const players = [];
-  const writes = [];
-  const warnings = [];
   const get = (name) => {
     if (!nodes.has(name)) {
       const node = { tagName: 'DIV', parentNode: { append(node) { nodes.set(node.id, node); } },
@@ -53,6 +57,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     }
     return nodes.get(name);
   };
+
   const document = { body: { dataset: { roomId: 'test-room', syncUrl: '/assets/hash-sync.js' } }, hidden: false,
     getElementById: get, addEventListener(event, fn) { documentEvents.set(event, fn); },
     createElement(tag) { return { tagName: tag.toUpperCase(), dataset: {}, children: [],
@@ -63,6 +68,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
       classList: { add() {} }, setAttribute(key, value) { this.attributes[key] = value; },
       append(...children) { this.children.push(...children); } }; },
     head: { scripts: [], append(script) { this.scripts.push(script); } } };
+
   class WebSocket {
     static OPEN = 1;
     static CONNECTING = 0;
@@ -76,38 +82,75 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     }
     close(code = 1006) { this.readyState = 3; this.events.close?.({ code }); }
   }
+
   const YT = {
     PlayerState: { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 },
     Player: class {
       constructor(mount, options) {
-        this.options = options; this.state = -1; this.time = 0; this.duration = 100; this.rate = 1;
-        this.videoId = ''; this.messages = []; this.seeks = []; this.plays = 0; this.pauses = 0;
-        this.videos = []; this.cues = []; this.loads = []; this.rateWrites = []; players.push(this);
-        assert.equal(get(mount).tagName, 'DIV'); get(mount).tagName = 'IFRAME';
+        this.options = options;
+        this.state = -1;
+        this.time = 0;
+        this.duration = 100;
+        this.rate = 1;
+        this.videoId = '';
+
+        this.messages = [];
+        this.seeks = [];
+        this.plays = 0;
+        this.pauses = 0;
+        this.videos = [];
+        this.cues = [];
+        this.loads = [];
+        this.rateWrites = [];
+        players.push(this);
+
+        assert.equal(get(mount).tagName, 'DIV');
+        get(mount).tagName = 'IFRAME';
       }
       ready() { this.options.events.onReady(); }
       destroy() { this.destroyed = true; nodes.delete('player-mount'); }
-      deliver() { let count = 0; while (this.messages.length) { assert.ok(count++ < 30, 'no correction write loop'); this.messages.shift()(); } }
-      emit(state) { this.state = state; this.options.events.onStateChange({ data: state }); }
-      cueVideoById(value) {
-        this.videos.push(value); this.cues.push(value);
-        this.messages.push(() => { this.videoId = value.videoId; this.time = value.startSeconds; this.emit(5); });
+      deliver() {
+        let count = 0;
+        while (this.messages.length) {
+          assert.ok(count++ < 30, 'no correction write loop');
+          this.messages.shift()();
+        }
       }
-      loadVideoById(value) {
-        this.videos.push(value); this.loads.push(value);
+      emit(state) { this.state = state; this.options.events.onStateChange({ data: state }); }
+
+      cueVideoById(value) {
+        this.videos.push(value);
+        this.cues.push(value);
         this.messages.push(() => {
-          this.videoId = value.videoId; this.time = value.startSeconds;
-          this.emit(3); this.emit(1);
+          this.videoId = value.videoId;
+          this.time = value.startSeconds;
+          this.emit(5);
         });
       }
+
+      loadVideoById(value) {
+        this.videos.push(value);
+        this.loads.push(value);
+        this.messages.push(() => {
+          this.videoId = value.videoId;
+          this.time = value.startSeconds;
+          this.emit(3);
+          this.emit(1);
+        });
+      }
+
       seekTo(value) {
         this.seeks.push(value);
-        this.messages.push(() => { const wasPlaying = this.state === 1; this.time = value; this.emit(3); this.emit(wasPlaying ? 1 : 2); });
+        this.messages.push(() => {
+          const wasPlaying = this.state === 1;
+          this.time = value;
+          this.emit(3);
+          this.emit(wasPlaying ? 1 : 2);
+        });
       }
+
       playVideo() {
         this.plays++;
-        // YouTube may reject play while the bootstrap iframe still has no video,
-        // even if a cue is queued ahead of it. Capture metadata at dispatch time.
         const missingVideo = !this.videoId;
         this.messages.push(() => {
           if (missingVideo) this.options.events.onError({ data: 2 });
@@ -115,20 +158,25 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
         });
       }
       pauseVideo() { this.pauses++; this.messages.push(() => this.emit(2)); }
+
       getCurrentTime() { return this.time; }
       getDuration() { return this.duration; }
       getPlayerState() { return this.state; }
       getVideoData() { return unavailableInitialCaches && !this.videoId ? undefined : { video_id: this.videoId }; }
       getPlaybackRate() { return unavailableInitialCaches && !this.videoId ? undefined : this.rate; }
       getAvailablePlaybackRates() { return unavailableInitialCaches && !this.videoId ? undefined : rates; }
+
       setPlaybackRate(rate) {
         assert.ok(rates.includes(rate), 'only supported rates are written');
         this.rateWrites.push(rate);
         this.messages.push(() => { this.rate = rate; this.options.events.onPlaybackRateChange({ data: rate }); });
       }
+
       userState(state, lagCache = false) {
-        if (lagCache) { this.messages.push(() => { this.state = state; }); this.options.events.onStateChange({ data: state }); }
-        else this.emit(state);
+        if (lagCache) {
+          this.messages.push(() => { this.state = state; });
+          this.options.events.onStateChange({ data: state });
+        } else this.emit(state);
       }
       userRate(rate, lagCache = false) {
         if (lagCache) this.messages.push(() => { this.rate = rate; }); else this.rate = rate;
@@ -136,6 +184,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
       }
     },
   };
+
   const globals = { YT: api ? YT : undefined, crypto: { randomUUID: () => `command-${++commandId}` } };
   const setTimeout = (fn, ms) => { const key = ++timerId; timers.set(key, { fn, ms }); return key; };
   const clearTimeout = (key) => timers.delete(key);
@@ -151,6 +200,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     (fn, ms) => intervals.push({ fn, ms }), { clipboard: { async writeText(value) {
       if (clipboardBlocked) throw Error('denied'); copied = value;
     } } }, { warn(...args) { warnings.push(args); } });
+
   const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
   const tick = (ms = 300) => intervals.find((timer) => timer.ms === ms).fn();
   const frame = (ms = 300, advance = true) => {
@@ -162,10 +212,19 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     const ws = sockets.at(-1);
     ws.testRole = role;
     snapshot.participants = snapshot.participants.map((member) => member.id === 1 ? { ...member, role } : member);
-    ws.open(); ws.receive({ type: 'welcome', role, member_id: 1, snapshot, server_ms: now });
-    await flush(); return ws;
+    ws.open();
+    ws.receive({ type: 'welcome', role, member_id: 1, snapshot, server_ms: now });
+    await flush();
+    return ws;
   };
-  const ready = () => { const p = players.at(-1); p.ready(); p.deliver(); frame(); frame(); return p; };
+  const ready = () => {
+    const p = players.at(-1);
+    p.ready();
+    p.deliver();
+    frame();
+    frame();
+    return p;
+  };
   const state = (ws, snapshot) => {
     snapshot.participants = snapshot.participants.map((member) => member.id === 1 ? { ...member, role: ws.testRole } : member);
     ws.receive({ type: 'snapshot', snapshot, server_ms: now });
@@ -173,23 +232,31 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
   const accept = (ws, command = commands(ws).at(-1), overrides = {}, snapshotFirst = false) => {
     const revision = command.revision + 1;
     const action = command.action;
-    let snapshot = { ...ws.latestSnapshot, revision, anchor_ms: now };
+    const snapshot = { ...ws.latestSnapshot, revision, anchor_ms: now };
     if (action.type === 'set_video') Object.assign(snapshot, { video_id: action.video_id, media_revision: revision, playing: false, position_secs: 0, playback_rate: 1 });
     else if (action.type === 'set_rate') Object.assign(snapshot, { position_secs: sync.targetPosition(ws.latestSnapshot, now), playback_rate: action.playback_rate });
     else Object.assign(snapshot, { playing: action.type === 'play', position_secs: action.position_secs });
     Object.assign(snapshot, overrides);
+
     if (snapshotFirst) state(ws, snapshot);
     ws.receive({ type: 'ack', id: command.id, revision });
     if (!snapshotFirst) state(ws, snapshot);
     return snapshot;
   };
+
   return { get, document, documentEvents, windowEvents, sockets, players, timers, intervals, stored, historyCalls, writes, warnings,
     welcome, ready, frame, tick, accept, state, flush, get copied() { return copied; },
     time(value) { now = value; },
     click(name) { return get(name).events.click?.({ preventDefault() {} }); },
     submit(name) { return get(name).events.submit?.({ preventDefault() {} }); },
-    fireTimer(ms) { const entry = [...timers].find(([, timer]) => timer.ms === ms); assert.ok(entry); timers.delete(entry[0]); entry[1].fn(); } };
+    fireTimer(ms) {
+      const entry = [...timers].find(([, timer]) => timer.ms === ms);
+      assert.ok(entry);
+      timers.delete(entry[0]);
+      entry[1].fn();
+    } };
 }
+
 const commands = (ws) => ws.sent.filter((message) => message.type === 'command');
 const socialCommands = (ws) => ws.sent.filter((message) => message.type === 'social');
 const event = (id, kind, overrides = {}) => ({ id, kind, at_ms: 1000, member_id: 1,
@@ -201,11 +268,13 @@ test('Companions suggest videos without playback commands and chat drafts clear 
 
   assert.equal(b.get('load-video').textContent, 'Suggest');
   assert.equal(b.get('video-url').disabled, false);
+
   b.get('video-url').value = `https://youtu.be/${id}`;
   b.submit('video-form');
   const proposal = socialCommands(ws)[0];
   assert.deepEqual(proposal.action, { type: 'propose_video', video_id: id });
   assert.equal(commands(ws).length, 0);
+
   ws.receive({ type: 'social_ack', id: 'other', event_id: 1 });
   assert.equal(b.get('video-url').value, `https://youtu.be/${id}`);
   ws.receive({ type: 'social_ack', id: proposal.id, event_id: 1 });
@@ -228,6 +297,7 @@ test('chat YouTube links become proposals and disconnects preserve unsent text',
   b.get('chat-message').value = `https://youtu.be/${id}`;
   b.submit('chat-form');
   assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', video_id: id });
+
   ws.close();
   assert.equal(b.get('chat-message').value, `https://youtu.be/${id}`);
   assert.equal(b.get('send-message').disabled, true);
@@ -242,6 +312,7 @@ test('retained feed is appended once on same-revision snapshots and changes only
 
   assert.equal(feed.children.length, 2);
   assert.equal(feed.children[1].children[1].children[1].textContent, '<img src=x onerror=alert(1)>');
+
   const first = feed.children[0];
   b.state(ws, initial({ events: entries }));
   assert.equal(feed.children.length, 2);
@@ -251,6 +322,7 @@ test('retained feed is appended once on same-revision snapshots and changes only
   assert.equal(feed.children.length, 3);
   assert.equal(feed.children[0], first);
   assert.equal(commands(ws).length, 0);
+
   ws.close();
   b.click('reconnect-button');
   await b.welcome(initial({ incarnation: 'b', events: [event(1, 'left')] }));
@@ -269,6 +341,7 @@ test('new activity does not scroll someone reading history; unread control retur
   b.state(ws, initial({ events: [event(1, 'joined'), event(2, 'message', { text: 'Hello!' })] }));
   assert.equal(feed.scrollTop, 100);
   assert.equal(b.get('chat-unread').hidden, false);
+
   b.click('chat-unread');
   assert.equal(feed.scrollTop, 1000);
   assert.equal(b.get('chat-unread').hidden, true);
@@ -286,6 +359,7 @@ test('same-revision grants enable Co-keeper proposal approval and revocation dis
   assert.equal(b.get('role-label').textContent, 'You’re a Co-keeper');
   assert.equal(b.get('load-video').textContent, 'Watch');
   assert.equal(proposal.button.hidden, false);
+
   proposal.button.events.click();
   assert.deepEqual(commands(ws)[0].action, { type: 'set_video', video_id: id });
   assert.equal(proposal.button.disabled, true);
@@ -303,6 +377,7 @@ test('Keepers grant roles through independent social actions; Co-keepers do not 
   const b = await browser();
   const ws = await b.welcome(initial({ members: 2 }));
   const button = b.get('members').children[1].children[2];
+
   button.events.click();
   assert.deepEqual(socialCommands(ws)[0].action, { type: 'set_moderator', member_id: 2, enabled: true });
   assert.equal(commands(ws).length, 0);
@@ -322,8 +397,14 @@ test('native Co-keeper controls share playback; buffering never produces a banne
   assert.equal(b.get('room-notice').hidden, true);
   p.userState(1);
   assert.equal(commands(ws)[0].action.type, 'play');
-  b.accept(ws); p.deliver(); b.frame(); b.frame();
-  p.userState(2); b.frame(300, false);
+
+  b.accept(ws);
+  p.deliver();
+  b.frame();
+  b.frame();
+
+  p.userState(2);
+  b.frame(300, false);
   assert.equal(commands(ws)[1].action.type, 'pause');
 });
 
@@ -331,6 +412,7 @@ test('member list renders stable local avatars, roles and own identity without p
   const b = await browser();
   const ws = await b.welcome(initial({ members: 2 }));
   const list = b.get('members');
+
   assert.equal(list.children.length, 2);
   assert.equal(list.children[0].dataset.role, 'host');
   assert.equal(list.children[0].children[1].children[0].textContent, 'Sleepy Waffle (you)');
@@ -343,9 +425,11 @@ test('member list renders stable local avatars, roles and own identity without p
   b.state(ws, initial({ members: 2, revision: 1 }));
   assert.equal(list.replacements, replacements, 'playback changes do not rebuild the member list');
   assert.equal(list.children[0].children[0], firstAvatar);
+
   b.state(ws, initial({ members: 3, revision: 1 }));
   assert.equal(list.children.length, 3);
   assert.equal(commands(ws).length, 0, 'presence does not generate playback commands');
+
   b.state(ws, initial({ members: 1, revision: 1 }));
   assert.equal(list.children.length, 1);
 });
@@ -353,9 +437,11 @@ test('member list renders stable local avatars, roles and own identity without p
 test('credentials, clean canonical address and icon-only invite copy remain safe', async () => {
   const b = await browser({ token: 'secret', query: '?tracking=x&host=ignored', pathname: '/room/test-room/' });
   const ws = await b.welcome();
+
   assert.equal(b.stored.get('sameframe:host:test-room'), 'secret');
   assert.deepEqual(b.historyCalls[0], [null, '', '/room/test-room']);
   assert.deepEqual(ws.sent[0], { type: 'join', host_token: 'secret' });
+
   await b.click('copy-link');
   assert.equal(b.copied, 'https://sameframe.test/room/test-room');
   assert.equal(b.get('copy-link').textContent, '');
@@ -366,6 +452,7 @@ test('storage blocking and clipboard denial have safe visible fallbacks', async 
   const b = await browser({ token: 'secret', storageBlocked: true, clipboardBlocked: true });
   const ws = await b.welcome();
   assert.equal(ws.sent[0].host_token, 'secret');
+
   await b.click('copy-link');
   assert.equal(b.get('copy-feedback').textContent, 'Copy URL from address bar');
   assert.equal(b.get('copy-link').title, 'Copy URL from address bar');
@@ -373,11 +460,18 @@ test('storage blocking and clipboard denial have safe visible fallbacks', async 
 });
 
 test('native controls enabled; selected video initially paused; no duplicate handlers', async () => {
-  const b = await browser(); const ws = await b.welcome();
-  b.get('video-url').value = id; b.submit('video-form'); b.submit('video-form');
+  const b = await browser();
+  const ws = await b.welcome();
+
+  b.get('video-url').value = id;
+  b.submit('video-form');
+  b.submit('video-form');
   assert.equal(commands(ws).length, 1);
   assert.equal(b.get('load-video').disabled, true);
-  b.accept(ws); await b.flush(); const p = b.ready();
+
+  b.accept(ws);
+  await b.flush();
+  const p = b.ready();
   assert.deepEqual(p.options.playerVars, { controls: 1, disablekb: 0, fs: 1, playsinline: 1, rel: 0, origin: 'https://sameframe.test' });
   assert.equal(p.state, 2);
   assert.equal(p.time, 0);
@@ -386,11 +480,19 @@ test('native controls enabled; selected video initially paused; no duplicate han
 });
 
 test('native host play and stable pause issue revisioned commands despite asynchronous state getters', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
   p.userState(1, true);
   assert.equal(p.getPlayerState(), 2, 'cached state still paused');
   assert.equal(commands(ws)[0].action.type, 'play');
-  b.accept(ws); p.deliver(); b.frame(); b.frame();
+
+  b.accept(ws);
+  p.deliver();
+  b.frame();
+  b.frame();
+
   p.userState(2, true);
   assert.equal(commands(ws).length, 1, 'pause debounce avoids buffering transitions');
   b.frame(300, false);
@@ -399,120 +501,217 @@ test('native host play and stable pause issue revisioned commands despite asynch
 });
 
 test('native paused seek and playing scrub are observed before room drift correction', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  p.time = 30; b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  p.time = 30;
+  b.frame(300, false);
   assert.deepEqual(commands(ws)[0].action, { type: 'pause', position_secs: 30 });
   assert.equal(p.seeks.length, 0, 'native scrub not corrected back before its command');
-  b.accept(ws); p.deliver(); b.frame(); b.frame();
-  p.userState(1); b.accept(ws); p.deliver(); b.frame(); b.frame();
-  p.time = 60; p.userState(3);
+
+  b.accept(ws);
+  p.deliver();
+  b.frame();
+  b.frame();
+
+  p.userState(1);
+  b.accept(ws);
+  p.deliver();
+  b.frame();
+  b.frame();
+
+  p.time = 60;
+  p.userState(3);
   assert.equal(commands(ws).at(-1).action.type, 'play');
   assert.equal(commands(ws).at(-1).action.position_secs, 60, 'buffering during scrub preserves playing');
 });
 
 test('programmatic cue, seek, pause, play and delayed cached state updates never echo', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, position_secs: 10 })); const p = b.ready();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id, position_secs: 10 }));
+  const p = b.ready();
   assert.equal(commands(ws).length, 0);
+
   b.state(ws, initial({ revision: 1, video_id: id, playing: true, position_secs: 40, anchor_ms: 1600 }));
   assert.equal(p.time, 10, 'programmatic seek getter still old');
-  b.frame(300, false); p.deliver(); b.frame(); b.frame();
+  b.frame(300, false);
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 0);
+
   b.state(ws, initial({ revision: 2, video_id: id, position_secs: 20 }));
-  p.deliver(); b.frame(); b.frame();
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 0);
   assert.equal(p.state, 2);
 });
 
 test('one command plus one latest intention coalesces rapid scrub/play/pause without older ack rollback', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
   p.userState(1);
   const first = commands(ws)[0];
-  p.time = 25; b.frame(300, false);
-  p.time = 42; p.userState(2); b.frame(300, false);
+  p.time = 25;
+  b.frame(300, false);
+  p.time = 42;
+  p.userState(2);
+  b.frame(300, false);
   assert.equal(commands(ws).length, 1);
+
   b.accept(ws, first, {}, true);
   assert.equal(commands(ws).length, 2);
   assert.deepEqual(commands(ws)[1].action, { type: 'pause', position_secs: 42 });
   assert.equal(p.time, 42, 'older play ack does not overwrite newest paused scrub');
-  b.accept(ws); p.deliver(); b.frame(); b.frame();
+
+  b.accept(ws);
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 2);
 });
 
 test('media generation changes discard old pending/queued scrub and ignore stale video events', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  p.userState(1); const old = commands(ws)[0];
-  p.time = 42; b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  p.userState(1);
+  const old = commands(ws)[0];
+  p.time = 42;
+  b.frame(300, false);
+
   b.state(ws, initial({ revision: 2, media_revision: 2, video_id: 'abcdefghijk' }));
-  p.userState(0); p.userState(1); p.time = 70; b.tick();
+  p.userState(0);
+  p.userState(1);
+  p.time = 70;
+  b.tick();
   ws.receive({ type: 'ack', id: old.id, revision: 1 });
   assert.equal(commands(ws).length, 1);
-  p.deliver(); b.frame(); b.frame();
+
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(p.videoId, 'abcdefghijk');
   assert.equal(commands(ws).length, 1);
   assert.equal(p.state, 2);
 });
 
 test('old-video scrubs during Load are discarded; new-media native input may coalesce before Load ack', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  b.get('video-url').value = 'abcdefghijk'; b.submit('video-form');
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  b.get('video-url').value = 'abcdefghijk';
+  b.submit('video-form');
   const load = commands(ws)[0];
-  p.time = 42; p.userState(1); b.frame();
+  p.time = 42;
+  p.userState(1);
+  b.frame();
   assert.equal(commands(ws).length, 1);
+
   b.state(ws, initial({ revision: 1, media_revision: 1, video_id: 'abcdefghijk' }));
-  p.deliver(); b.frame(); b.frame();
-  p.time = 30; b.frame(300, false);
+  p.deliver();
+  b.frame();
+  b.frame();
+  p.time = 30;
+  b.frame(300, false);
   assert.equal(commands(ws).length, 1);
+
   ws.receive({ type: 'ack', id: load.id, revision: 1 });
   assert.deepEqual(commands(ws)[1].action, { type: 'pause', position_secs: 30 });
   assert.equal(commands(ws)[1].revision, 1);
 });
 
 test('pending native rate plus queued scrub cannot cross a same-ID media generation', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  p.userRate(2); const rate = commands(ws)[0];
-  p.time = 42; b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  p.userRate(2);
+  const rate = commands(ws)[0];
+  p.time = 42;
+  b.frame(300, false);
+
   b.state(ws, initial({ revision: 2, media_revision: 2, video_id: id }));
   ws.receive({ type: 'ack', id: rate.id, revision: 1 });
-  p.deliver(); b.frame(); b.frame();
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 1);
   assert.equal(p.rate, 1);
   assert.equal(p.time, 0);
 });
 
 test('same ID only re-cues on media_revision change, not pause or seek zero', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  b.state(ws, initial({ revision: 1, video_id: id })); p.deliver(); b.frame();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  b.state(ws, initial({ revision: 1, video_id: id }));
+  p.deliver();
+  b.frame();
   assert.equal(p.videos.length, 1);
+
   p.options.events.onError({ data: 100 });
-  b.state(ws, initial({ revision: 2, media_revision: 2, video_id: id })); p.deliver(); b.frame(); b.frame();
+  b.state(ws, initial({ revision: 2, media_revision: 2, video_id: id }));
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(p.videos.length, 2);
   assert.equal(b.get('room-error').hidden, true);
 });
 
 test('buffering, stalled local time and short paused buffer transitions never pause/seek room', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true })); const p = b.ready();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id, playing: true }));
+  const p = b.ready();
+
   p.userState(3);
   for (let i = 0; i < 20; i++) b.frame(300, false);
   assert.equal(commands(ws).length, 0);
   assert.equal(p.seeks.length, 0, 'unchanged buffering never hard-seeks');
-  p.userState(2); b.frame(100, false); p.userState(1);
+
+  p.userState(2);
+  b.frame(100, false);
+  p.userState(1);
   assert.equal(commands(ws).length, 0, 'short buffer PAUSED observation is not a user pause');
-  p.deliver(); b.frame(); b.frame();
+
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 0, 'buffer-exit catch-up is programmatic');
 });
 
 test('guest native pause and seeks detach locally; native Play stays local; explicit Rejoin catches up', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true }), 'guest'); const p = b.ready();
-  p.userState(2); b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id, playing: true }), 'guest');
+  const p = b.ready();
+
+  p.userState(2);
+  b.frame(300, false);
   assert.equal(b.get('join-playback').textContent, 'Rejoin playback');
   assert.equal(b.get('join-playback').hidden, false);
   assert.equal(b.get('playback-status').textContent, 'YouTube · watching locally');
+
   const plays = p.plays;
   for (let i = 0; i < 5; i++) b.frame(300, false);
   assert.equal(p.plays, plays, 'local pause is not force-resumed');
-  p.time = 0; b.frame(300, false); p.userState(1); b.frame();
+
+  p.time = 0;
+  b.frame(300, false);
+  p.userState(1);
+  b.frame();
   assert.equal(p.seeks.length, 0, 'rewind and native Play remain local');
-  b.click('join-playback'); p.deliver(); b.frame(); b.frame();
+
+  b.click('join-playback');
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(b.get('join-playback').hidden, true);
   assert.ok(p.seeks.at(-1) > 2);
   assert.equal(b.get('playback-status').textContent, 'YouTube · following room');
@@ -520,27 +719,48 @@ test('guest native pause and seeks detach locally; native Play stays local; expl
 });
 
 test('guest paused seek detaches, a new host media selection reattaches with a clear notice', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id }), 'guest'); const p = b.ready();
-  p.time = 30; b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }), 'guest');
+  const p = b.ready();
+
+  p.time = 30;
+  b.frame(300, false);
   assert.match(b.get('room-notice').textContent, /local on this device/);
-  b.state(ws, initial({ revision: 1, media_revision: 1, video_id: id })); p.deliver(); b.frame(); b.frame();
+
+  b.state(ws, initial({ revision: 1, media_revision: 1, video_id: id }));
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(b.get('join-playback').hidden, true);
   assert.match(b.get('room-notice').textContent, /following the room again/);
   assert.equal(commands(ws).length, 0);
 });
 
 test('native host rate is sent once; combined rate + scrub intentions are serialized without loss', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
   p.userRate(2, true);
   assert.equal(p.getPlaybackRate(), 1, 'rate cache still old when event arrives');
   assert.deepEqual(commands(ws)[0].action, { type: 'set_rate', playback_rate: 2 });
-  p.deliver(); p.time = 30; b.frame(300, false); p.userState(1);
+
+  p.deliver();
+  p.time = 30;
+  b.frame(300, false);
+  p.userState(1);
   assert.equal(commands(ws).length, 1);
+
   b.accept(ws);
   assert.equal(commands(ws).length, 2);
   assert.equal(commands(ws)[1].action.type, 'play');
   assert.ok(commands(ws)[1].action.position_secs >= 30);
-  b.accept(ws); p.deliver(); b.frame(); b.frame();
+
+  b.accept(ws);
+  p.deliver();
+  b.frame();
+  b.frame();
+
   const count = commands(ws).length;
   for (let i = 0; i < 8; i++) b.frame();
   assert.equal(commands(ws).length, count, 'natural 2× advancement is never classified as a scrub');
@@ -595,42 +815,83 @@ test('autoplay denial shows local Join and native Play rejoins without a host/gu
 });
 
 test('reconnect discards pending and latest native intentions, even across process/rate resets', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  p.userState(1); p.time = 42; b.frame(300, false); ws.close();
-  p.time = 55; p.userState(2); b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  p.userState(1);
+  p.time = 42;
+  b.frame(300, false);
+  ws.close();
+
+  p.time = 55;
+  p.userState(2);
+  b.frame(300, false);
+
   b.click('reconnect-button');
-  const next = await b.welcome(initial({ incarnation: 'b', video_id: id })); p.deliver(); b.frame(); b.frame();
+  const next = await b.welcome(initial({ incarnation: 'b', video_id: id }));
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(next).length, 0);
   assert.equal(p.state, 2);
   assert.equal(p.time, 0);
 });
 
 test('stale_revision discards coalesced intent and reconciles only the fresh snapshot', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
-  p.userState(1); p.time = 42; b.frame(300, false);
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+
+  p.userState(1);
+  p.time = 42;
+  b.frame(300, false);
   ws.receive({ type: 'error', code: 'stale_revision', id: commands(ws)[0].id, message: 'Room changed' });
   assert.equal(b.get('load-video').disabled, true);
-  b.state(ws, initial({ revision: 3, video_id: id, position_secs: 10 })); p.deliver(); b.frame(); b.frame();
+
+  b.state(ws, initial({ revision: 3, video_id: id, position_secs: 10 }));
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 1);
   assert.equal(p.time, 10);
 });
 
 test('online during pending welcome closes old lease and ignores its delayed callbacks', async () => {
-  const b = await browser(); const old = b.sockets[0]; old.open(); b.windowEvents.get('online')();
+  const b = await browser();
+  const old = b.sockets[0];
+
+  old.open();
+  b.windowEvents.get('online')();
   assert.equal(old.readyState, 3);
   assert.equal(b.sockets.filter((ws) => ws.readyState < 2).length, 1);
   assert.equal([...b.timers.values()].filter((timer) => timer.ms === 10000).length, 1);
-  await b.welcome(); old.events.close({ code: 1006 });
+
+  await b.welcome();
+  old.events.close({ code: 1006 });
   assert.equal(b.get('connection-status').textContent, 'Connected');
 });
 
 test('hidden-tab time gaps are not scrubs; visibility sync and silent-open sockets recover', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true })); const p = b.ready();
-  b.document.hidden = true; b.documentEvents.get('visibilitychange')();
-  p.time = 20; b.time(20000); b.tick();
-  b.document.hidden = false; b.documentEvents.get('visibilitychange')(); p.deliver(); b.frame(); b.frame();
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id, playing: true }));
+  const p = b.ready();
+
+  b.document.hidden = true;
+  b.documentEvents.get('visibilitychange')();
+  p.time = 20;
+  b.time(20000);
+  b.tick();
+
+  b.document.hidden = false;
+  b.documentEvents.get('visibilitychange')();
+  p.deliver();
+  b.frame();
+  b.frame();
   assert.equal(commands(ws).length, 0);
-  b.time(60000); b.tick(10000);
+
+  b.time(60000);
+  b.tick(10000);
   assert.equal(ws.readyState, 3);
 });
 
@@ -690,7 +951,11 @@ test('atomic startup load retains the local autoplay watchdog and functional Joi
   const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 30 }), 'guest');
   const p = b.players[0]; p.ready();
   assert.equal(p.loads.length, 1);
-  p.messages = []; p.videoId = id; p.time = 30; p.state = 5; // Media loaded, autoplay denied.
+  p.messages = [];
+  p.videoId = id;
+  p.time = 30;
+  p.state = 5;
+
   b.fireTimer(2500);
   assert.equal(b.get('join-playback').hidden, false);
   assert.match(b.get('room-notice').textContent, /tap to start audio/);
@@ -777,7 +1042,7 @@ test('native initial Play before CUED or any cue sample survives the unconfirmed
   for (const role of ['host', 'guest']) {
     const b = await browser(); const ws = await b.welcome(initial({ video_id: id }), role);
     const p = b.players[0]; p.ready();
-    p.messages = []; // Delayed/missing cue and pause callbacks: no confirmed sample yet.
+    p.messages = [];
     p.videoId = id;
     const pauses = p.pauses;
     p.userState(3); b.frame(300, false);
@@ -794,7 +1059,7 @@ test('native initial Play before CUED or any cue sample survives the unconfirmed
 test('initial Play callback with unavailable video cache is retained by later stable getter samples', async () => {
   const b = await browser({ unavailableInitialCaches: true }); const ws = await b.welcome(initial({ video_id: id }));
   const p = b.players[0]; p.ready(); p.messages = [];
-  p.userState(1); // Still no video metadata: do not attribute this to old media.
+  p.userState(1);
   assert.equal(commands(ws).length, 0);
   p.videoId = id; b.frame(300); b.frame(300);
   assert.equal(commands(ws)[0].action.type, 'play');

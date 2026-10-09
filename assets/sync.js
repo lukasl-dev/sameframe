@@ -1,9 +1,9 @@
-// Pure protocol/timing policy shared by the browser and dependency-free Node tests.
 export const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 export function parseVideoId(input) {
   const text = String(input ?? '').trim();
   if (VIDEO_ID.test(text)) return text;
+
   let url;
   try { url = new URL(text); } catch { return null; }
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port) return null;
@@ -27,7 +27,7 @@ export function parseRoomLink(input, origin) {
     const url = new URL(text, origin);
     if (url.origin !== origin || url.username || url.password) return null;
     const match = /^\/room\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
-    return match ? `/room/${match[1]}` : null; // Never carry a host fragment into a join link.
+    return match ? `/room/${match[1]}` : null;
   } catch { return null; }
 }
 
@@ -62,7 +62,6 @@ export function validSnapshot(s) {
       && (!['proposal', 'set_video'].includes(entry.kind) || VIDEO_ID.test(entry.video_id ?? '')));
 }
 
-// Local identicons: a public random seed stays fixed for this connection's lifetime.
 export function avatarPattern(seed) {
   const colors = ['#cba6f7', '#89b4fa', '#a6e3a1', '#f5c2e7', '#fab387', '#94e2d5'];
   const bits = parseInt(seed.slice(2, 6), 16) | (1 << 8);
@@ -75,16 +74,21 @@ export function avatarPattern(seed) {
   return { color: colors[parseInt(seed.slice(0, 2), 16) % colors.length], cells };
 }
 
-// A welcome begins a new socket's history: process restarts may reset revision/time.
 export class SnapshotOrder {
   constructor() { this.reset(); }
-  reset() { this.snapshot = null; this.serverMs = -Infinity; }
+
+  reset() {
+    this.snapshot = null;
+    this.serverMs = -Infinity;
+  }
+
   accept(snapshot, serverMs, welcome = false) {
     if (!validSnapshot(snapshot) || !Number.isFinite(serverMs) || serverMs < 0) return false;
     const previous = welcome ? null : this.snapshot;
     if (previous && (snapshot.incarnation !== previous.incarnation
       || snapshot.revision < previous.revision
       || (snapshot.revision === previous.revision && serverMs < this.serverMs))) return false;
+
     this.snapshot = snapshot;
     this.serverMs = serverMs;
     return true;
@@ -93,21 +97,27 @@ export class SnapshotOrder {
 
 export class ClockFilter {
   constructor() { this.reset(); }
-  reset() { this.samples = []; this.offset = null; }
+
+  reset() {
+    this.samples = [];
+    this.offset = null;
+  }
+
   seed(serverMs, receivedMs) {
     if (this.offset === null && Number.isFinite(serverMs) && Number.isFinite(receivedMs)) {
       this.offset = serverMs - receivedMs;
     }
   }
+
   sample(sentMs, receivedMs, serverMs) {
     const rtt = receivedMs - sentMs;
     if (![sentMs, receivedMs, serverMs].every(Number.isFinite) || rtt < 0 || rtt > 10000) return false;
     this.samples.push({ rtt, offset: serverMs - (sentMs + receivedMs) / 2 });
     if (this.samples.length > 12) this.samples.shift();
-    // Long-RTT responses don't move the clock while a recent better sample exists.
     this.offset = this.samples.reduce((best, sample) => sample.rtt <= best.rtt ? sample : best).offset;
     return true;
   }
+
   serverNow(localMs) { return localMs + (this.offset ?? 0); }
 }
 
@@ -118,7 +128,6 @@ export function targetPosition(snapshot, serverMs, duration = Infinity) {
   return Math.min(end, Math.max(0, position));
 }
 
-// Revision changes are authoritative user intent, unlike periodic drift correction.
 export function playbackUpdate(previous, next) {
   const newRevision = !previous || previous.incarnation !== next.incarnation || previous.revision !== next.revision;
   const newVideo = !previous || previous.incarnation !== next.incarnation || previous.video_id !== next.video_id;
@@ -132,10 +141,9 @@ export function shouldSeek(current, target, nowMs, lastSeekMs, force = false, bu
   return (force || recovery || nowMs - lastSeekMs >= 3000) && Math.abs(current - target) > threshold;
 }
 
-// YouTube exposes neither a seek event nor a user/programmatic origin flag.
-// Observe local continuity (never room-clock drift), and settle our own async writes.
 export class NativePlaybackObserver {
   constructor() { this.reset(); }
+
   reset() {
     this.last = null;
     this.playing = null;
@@ -144,17 +152,20 @@ export class NativePlaybackObserver {
     this.eventState = null;
     this.state = null;
   }
+
   suppress(playing, position, at, rate = 1) {
     this.last = null;
     this.playing = playing;
     this.pauseCandidate = null;
     this.operation = { playing, position, rate, at, until: at + 4000, settledAt: null, nativePlayAt: null };
   }
+
   get settling() { return this.operation !== null; }
   get waiting() { return this.pauseCandidate !== null; }
+
   observe(position, state, at, event = false, rate = 1) {
     if (![position, at].every(Number.isFinite) || position < 0) return null;
-    // State callbacks are fresher than getPlayerState's postMessage-backed cache.
+
     if (event) this.eventState = { state, at };
     else if (this.eventState) {
       if (state === this.eventState.state || at - this.eventState.at >= 750) this.eventState = null;
@@ -162,23 +173,24 @@ export class NativePlaybackObserver {
     }
     this.state = state;
     const current = { position, state, at, rate };
+
     if (this.operation) {
       const op = this.operation;
       const expectedState = op.playing ? state === 1 : [2, 5].includes(state);
       const expectedPosition = op.position === null || (position >= op.position - 0.75
         && position <= op.position + 0.75 + (state === 1 ? Math.max(0, at - op.at) / 1000 * op.rate : 0));
-      // A paused cue never writes PLAYING. Keep a contrary Play callback even
-      // before CUED/the first cache sample, but drain short old setter callbacks.
+
       if (!op.playing && state === 1) {
         op.nativePlayAt ??= at;
-        if (op.nativePlayAt !== null && at - op.nativePlayAt >= 250) {
+        if (at - op.nativePlayAt >= 250) {
           this.operation = null;
           this.last = current;
           this.playing = true;
           return { playing: true, position, at, kind: 'state' };
         }
-        if (op.settledAt === null) return null; // Even near expiry, finish checking the native Play.
+        if (op.settledAt === null) return null;
       } else op.nativePlayAt = null;
+
       if (expectedState && expectedPosition) {
         op.settledAt ??= at;
         this.last = current;
@@ -186,13 +198,13 @@ export class NativePlaybackObserver {
       if (op.settledAt !== null && at - op.settledAt >= 250) {
         this.operation = null;
       } else if (at >= op.until) {
-        // An unconfirmed operation isn't a native pause/seek (e.g. denied autoplay).
         this.operation = null;
         this.last = current;
         this.playing = state === 1 ? true : state === 2 ? false : this.playing;
         return null;
       } else return null;
     }
+
     const previous = this.last;
     this.last = current;
     const elapsed = previous ? at - previous.at : Infinity;
@@ -200,7 +212,12 @@ export class NativePlaybackObserver {
     const seekThreshold = previous?.state === 2 && state === 2 ? 0.15 : 1.25;
     const seek = previous && elapsed >= 0 && elapsed <= 1500
       && Math.abs(position - previous.position - advance) > seekThreshold;
-    if (state === 0) { this.playing = false; this.pauseCandidate = null; return null; }
+
+    if (state === 0) {
+      this.playing = false;
+      this.pauseCandidate = null;
+      return null;
+    }
     if (state === 1) {
       const changed = this.playing === false;
       this.playing = true;
@@ -221,7 +238,6 @@ export class NativePlaybackObserver {
         }
       } else this.playing ??= false;
     } else {
-      // Buffering is not pause. Short PAUSED transitions around buffering are noise.
       this.pauseCandidate = null;
       if (seek && this.playing !== null) return { playing: this.playing, position, at, kind: 'seek' };
     }
@@ -230,7 +246,7 @@ export class NativePlaybackObserver {
 }
 
 export function supportedRate(requested, available) {
-  if (!Array.isArray(available)) return null; // YouTube's onReady can precede its video/rate caches.
+  if (!Array.isArray(available)) return null;
   const rates = available.filter((rate) => Number.isFinite(rate) && rate >= 0.25 && rate <= 4);
   if (!rates.length) return null;
   return rates.reduce((best, rate) => Math.abs(rate - requested) < Math.abs(best - requested) ? rate : best);

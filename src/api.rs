@@ -34,7 +34,6 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 path_param!(room_id);
 
-/// Bounds connections before they can send a join message, as well as joined sockets.
 #[derive(Clone)]
 pub(crate) struct ConnectionLimits {
     sockets: Arc<Semaphore>,
@@ -119,8 +118,6 @@ async fn room_socket(cx: &Cx, upgrade: WebSocketUpgrade) -> Result<Response> {
     upgrade
         .read_buffer_size(4096)
         .write_buffer_size(0)
-        // Tungstenite bounds a whole outgoing frame before flushing. Leave room
-        // for 100 escaped chat entries while keeping stalled writes bounded.
         .max_write_buffer_size(1024 * 1024)
         .max_message_size(4096)
         .max_frame_size(4096)
@@ -199,19 +196,15 @@ enum ServerMessage {
 }
 
 async fn serve_member(mut socket: WebSocket, room: RoomHandle, rooms: Rooms) {
-    let join = timeout(JOIN_TIMEOUT, socket.recv()).await;
-    let token = match join {
-        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str(&text) {
-            Ok(ClientMessage::Join { host_token }) => host_token,
-            _ => {
-                close_socket(&mut socket, 1008, "First message must join the room").await;
-                return;
-            }
-        },
-        _ => return,
+    let Ok(Some(Ok(Message::Text(text)))) = timeout(JOIN_TIMEOUT, socket.recv()).await else {
+        return;
+    };
+    let Ok(ClientMessage::Join { host_token }) = serde_json::from_str(&text) else {
+        close_socket(&mut socket, 1008, "First message must join the room").await;
+        return;
     };
 
-    let member = match room.join(token).await {
+    let member = match room.join(host_token).await {
         Ok(member) => member,
         Err(error) => {
             let _ = send_socket(&mut socket, &failure(error, None)).await;
@@ -260,14 +253,10 @@ async fn serve_member(mut socket: WebSocket, room: RoomHandle, rooms: Rooms) {
             break;
         }
 
-        let Message::Text(text) = message else {
-            if matches!(message, Message::Close(_)) {
-                break;
-            }
-            if matches!(message, Message::Binary(_)) {
-                break;
-            }
-            continue;
+        let text = match message {
+            Message::Text(text) => text,
+            Message::Close(_) | Message::Binary(_) => break,
+            _ => continue,
         };
 
         let response = match serde_json::from_str::<ClientMessage>(&text) {
@@ -345,8 +334,6 @@ async fn write_updates(
             },
         };
 
-        // A sync reply can sit behind a newer watch update. Read state at write
-        // time so queued replies cannot regress membership or playback.
         let response = match response {
             ServerMessage::Snapshot { .. } => ServerMessage::Snapshot {
                 snapshot: snapshots.borrow_and_update().clone(),
@@ -402,7 +389,6 @@ fn json_response(status: StatusCode, value: &impl Serialize) -> Result<Response>
         .body(Body::from(serde_json::to_string(value)?))?)
 }
 
-/// Compare authorities, not suffixes; a hostile lookalike host is never same-origin.
 pub(crate) fn same_origin(headers: &HeaderMap, required: bool) -> bool {
     let Some(origin) = headers.get("origin") else {
         return !required;
@@ -468,6 +454,7 @@ mod tests {
     #[test]
     fn origin_checks_authority_not_host_suffix() {
         assert!(same_origin(&origin_headers("http://localhost:3000"), true));
+
         assert!(!same_origin(
             &origin_headers("http://localhost:3000.evil.test"),
             true
@@ -478,6 +465,7 @@ mod tests {
             &origin_headers("http://localhost:3000/path"),
             true
         ));
+
         assert!(!same_origin(&HeaderMap::new(), true));
         assert!(same_origin(&HeaderMap::new(), false));
     }
@@ -498,6 +486,7 @@ mod tests {
     #[test]
     fn incoming_messages_are_strict_and_small() {
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"sync"}"#).is_ok());
+
         assert!(
             serde_json::from_str::<ClientMessage>(r#"{"type":"sync","unexpected":1}"#).is_err()
         );

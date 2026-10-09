@@ -3,7 +3,6 @@
 @source "./assets/room.js";
 @custom-variant dark (&:is(.dark *));
 
-/* Catppuccin Mocha, always dark. Keep Topcoat's semantic tokens available. */
 @theme inline {
   --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --color-background: var(--background);
@@ -33,6 +32,7 @@
 
 :root, .dark {
   color-scheme: dark;
+
   --base: #1e1e2e;
   --mantle: #181825;
   --crust: #11111b;
@@ -46,6 +46,7 @@
   --pink: #f5c2e7;
   --red: #f38ba8;
   --green: #a6e3a1;
+
   --background: var(--base);
   --foreground: var(--text);
   --card: var(--mantle);
@@ -67,6 +68,7 @@
   --sidebar-accent-foreground: var(--text);
   --sidebar-border: var(--surface0);
   --sidebar-ring: var(--lavender);
+
   --shadow-xs: 0 1px 2px rgb(0 0 0 / 15%);
   --shadow-sm: 0 8px 28px rgb(0 0 0 / 12%);
 }
@@ -74,6 +76,7 @@
 @layer base {
   *, *::before, *::after { box-sizing: border-box; }
   html { min-width: 320px; background: var(--background); }
+
   body {
     margin: 0;
     min-height: 100svh;
@@ -86,6 +89,7 @@
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
   }
+
   button, input { font: inherit; }
   button, a, input { -webkit-tap-highlight-color: transparent; }
   button { cursor: pointer; }
@@ -97,9 +101,11 @@
   h3 { font-size: .9375rem; line-height: 1.4; }
   p { color: var(--subtext); }
   svg { flex-shrink: 0; }
+
   [hidden] { display: none !important; }
   :focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; }
   ::selection { background: var(--lavender); color: var(--crust); }
+
   input {
     width: 100%;
     min-width: 0;
@@ -109,7 +115,6 @@
     background: var(--base);
     border: 1px solid var(--surface1);
     border-radius: 9px;
-    /* Avoid zooming forms on iOS. */
     font-size: 16px;
     line-height: 1.4;
     transition: border-color 140ms;
@@ -128,24 +133,27 @@
   .message { padding: 13px 16px; margin-top: 16px; border: 1px solid var(--surface1); border-radius: 10px; font-size: .875rem; overflow-wrap: anywhere; }
   .message-error { color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--mantle)); border-color: color-mix(in srgb, var(--red) 35%, var(--mantle)); }
 
-  /* Only illustration motion lives here; page styling stays beside its markup. */
   .nook-steam { animation: nook-steam 4s ease-in-out infinite; }
   .nook-glow { animation: nook-glow 7s ease-in-out infinite; }
   .nook-screen { animation: nook-glow 5s ease-in-out infinite reverse; }
   .nook-dream { animation: nook-dream 6s ease-in-out infinite; }
+
   @keyframes nook-steam {
     0%, 100% { opacity: 0; transform: translateY(3px); }
     35% { opacity: 1; }
     80% { opacity: 0; transform: translateY(-8px); }
   }
+
   @keyframes nook-glow {
     0%, 100% { opacity: .4; }
     50% { opacity: 1; }
   }
+
   @keyframes nook-dream {
     0%, 100% { opacity: .3; transform: translateY(2px); }
     50% { opacity: .9; transform: translateY(-3px); }
   }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   }

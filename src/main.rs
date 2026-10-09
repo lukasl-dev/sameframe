@@ -9,15 +9,18 @@ mod rooms;
 mod socket_tests;
 
 use clap::Parser;
-use http::header::{HeaderName, HeaderValue};
+use http::{
+    Method,
+    header::{HeaderName, HeaderValue},
+};
 use topcoat::{
     Result,
     asset::{AssetBundle, RouterBuilderAssetExt},
-    context::Cx,
+    context::{Cx, app_context},
     router::{
         Body, BodyLimit, Layer, LayerFuture, Next, OriginPolicy, Path, Router,
         RouterBuilderDiscoverExt,
-        request::{headers, uri},
+        request::{headers, method, uri},
         response::response_headers,
     },
 };
@@ -36,7 +39,6 @@ async fn main() -> Result<()> {
     };
     let router = Router::builder()
         .app_context(access)
-        // AccessGate owns origin enforcement so locked upgrades always return 401.
         .origin_policy(OriginPolicy::dangerous_disable())
         .app_context(rooms::Rooms::new())
         .app_context(api::ConnectionLimits::new())
@@ -59,60 +61,55 @@ impl Layer for BrowserPolicy {
     }
 
     fn handle<'a>(&'a self, cx: &'a Cx, body: Body, next: Next<'a>) -> LayerFuture<'a> {
-        let referrer = if access::has_access_query(uri(cx).query())
-            || !topcoat::context::app_context::<access::Access>(cx).authenticated(headers(cx))
-        {
-            "no-referrer"
-        } else {
-            "strict-origin-when-cross-origin"
-        };
-        let headers = response_headers(cx);
+        let query_token = access::has_access_query(uri(cx).query());
+        let referrer =
+            if query_token || !app_context::<access::Access>(cx).authenticated(headers(cx)) {
+                "no-referrer"
+            } else {
+                "strict-origin-when-cross-origin"
+            };
+        let policy_headers = response_headers(cx);
 
         for (name, value) in [
             ("x-content-type-options", "nosniff"),
             ("x-frame-options", "DENY"),
-            // YouTube needs the embedding origin, but not the private room path.
             ("referrer-policy", referrer),
         ] {
-            headers.append(
+            policy_headers.append(
                 HeaderName::from_static(name),
                 HeaderValue::from_static(value),
             );
         }
 
-        let private = access::has_access_query(uri(cx).query())
+        let private = query_token
             || !access::public_asset(uri(cx).path())
-            || topcoat::router::request::headers(cx).contains_key("upgrade")
-            || !matches!(
-                topcoat::router::request::method(cx),
-                &http::Method::GET | &http::Method::HEAD
-            );
+            || headers(cx).contains_key("upgrade")
+            || !matches!(method(cx), &Method::GET | &Method::HEAD);
         if private {
-            headers.append(
+            policy_headers.append(
                 HeaderName::from_static("vary"),
                 HeaderValue::from_static("Cookie"),
             );
         }
 
         Box::pin(async move {
-            let result = next.run(cx, body).await;
+            let mut result = next.run(cx, body).await;
             if private {
-                match result {
-                    Ok(mut response) => {
+                match &mut result {
+                    Ok(response) => {
                         response
                             .headers_mut()
                             .insert("cache-control", HeaderValue::from_static("no-store"));
-                        return Ok(response);
                     }
-                    Err(error) => {
-                        headers.append(
+                    Err(_) => {
+                        policy_headers.append(
                             HeaderName::from_static("cache-control"),
                             HeaderValue::from_static("no-store"),
                         );
-                        return Err(error);
                     }
                 }
             }
+
             result
         })
     }
@@ -121,13 +118,9 @@ impl Layer for BrowserPolicy {
 #[cfg(test)]
 mod tests {
     use http::{Request, StatusCode};
-    use topcoat::router::{Body, Router, RouterBuilderDiscoverExt, to_bytes};
+    use topcoat::router::{RouteFn, response::Response, to_bytes};
 
     use super::*;
-
-    fn api_router() -> Router {
-        router_with_access(access::Access::for_test("a".repeat(64)))
-    }
 
     fn router_with_access(access: access::Access) -> Router {
         Router::builder()
@@ -139,16 +132,9 @@ mod tests {
             .layer(access::AccessGate)
             .layer(BrowserPolicy)
             .discover()
-            // Keep these admission/API tests independent of an asset build.
-            .route(topcoat::router::RouteFn::new(
-                http::Method::GET,
-                "/test-admission",
-                |_, _| {
-                    Box::pin(async {
-                        Ok(topcoat::router::response::Response::new(Body::from("home")))
-                    })
-                },
-            ))
+            .route(RouteFn::new(Method::GET, "/test-admission", |_, _| {
+                Box::pin(async { Ok(Response::new(Body::from("home"))) })
+            }))
             .build()
     }
 
@@ -162,11 +148,7 @@ mod tests {
                 .await;
             assert_eq!(response.status(), StatusCode::OK);
             let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-            assert!(
-                !String::from_utf8(body.to_vec())
-                    .unwrap()
-                    .contains("access-form")
-            );
+            assert_eq!(String::from_utf8(body.to_vec()).unwrap(), "home");
         }
 
         let response = router
@@ -206,14 +188,14 @@ mod tests {
 
     #[tokio::test]
     async fn create_room_returns_private_credentials_without_caching() {
-        let router = api_router();
+        let access = access::Access::for_test("a".repeat(64));
+        let cookie = access.test_cookie();
+        let router = router_with_access(access);
+
         let request = Request::builder()
             .method("POST")
             .uri("/api/rooms")
-            .header(
-                "cookie",
-                access::Access::for_test("a".repeat(64)).test_cookie(),
-            )
+            .header("cookie", &cookie)
             .body(Body::empty())
             .unwrap();
         let response = router.handle(request).await;
@@ -232,37 +214,46 @@ mod tests {
 
     #[tokio::test]
     async fn cross_origin_creation_and_large_bodies_are_rejected() {
-        let router = api_router();
+        let access = access::Access::for_test("a".repeat(64));
+        let cookie = access.test_cookie();
+        let router = router_with_access(access);
+
         let cross_origin = Request::builder()
             .method("POST")
             .uri("/api/rooms")
-            .header(
-                "cookie",
-                access::Access::for_test("a".repeat(64)).test_cookie(),
-            )
+            .header("cookie", &cookie)
             .header("host", "localhost:3000")
             .header("origin", "https://other.example")
             .body(Body::empty())
             .unwrap();
 
-        assert_eq!(
-            router.handle(cross_origin).await.status(),
-            StatusCode::FORBIDDEN
+        let response = router.handle(cross_origin).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(
+            response
+                .headers()
+                .get_all("vary")
+                .iter()
+                .any(|value| value == "Cookie")
         );
 
         let large = Request::builder()
             .method("POST")
             .uri("/api/rooms")
-            .header(
-                "cookie",
-                access::Access::for_test("a".repeat(64)).test_cookie(),
-            )
+            .header("cookie", cookie)
             .body(Body::from("x".repeat(2048)))
             .unwrap();
 
-        assert_eq!(
-            router.handle(large).await.status(),
-            StatusCode::PAYLOAD_TOO_LARGE
+        let response = router.handle(large).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(
+            response
+                .headers()
+                .get_all("vary")
+                .iter()
+                .any(|value| value == "Cookie")
         );
     }
 }

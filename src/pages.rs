@@ -67,7 +67,6 @@ async fn viewing_nook(#[default] quiet: bool) -> Result<impl View> {
             fill="none"
             aria-hidden="true"
         >
-            // A small, self-contained illustration: no image/font requests or animation.
             <ellipse
                 cx="215"
                 cy="220"
@@ -377,7 +376,6 @@ pub(crate) async fn home() -> Result<impl View> {
     })
 }
 
-/// The access layer renders this instead of any private page until unlocked.
 #[component]
 pub(crate) async fn access_gate() -> Result<impl View> {
     Ok(view! {

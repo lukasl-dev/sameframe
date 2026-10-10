@@ -1017,8 +1017,13 @@ if (helpers) {
     const attempt = ++copyAttempt;
     clearTimeout(copyTimer);
     text('copy-feedback', '');
+    const invite = new URL(shareUrl);
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      const accessToken = localStorage.getItem('sameframe:access-token');
+      if (/^[0-9a-f]{64}$/.test(accessToken ?? '')) invite.searchParams.set('access_token', accessToken);
+    } catch {}
+    try {
+      await navigator.clipboard.writeText(invite.href);
       if (attempt !== copyAttempt) return;
       copyFeedback(true, 'Room link copied', 'Copied');
       copyTimer = setTimeout(() => copyFeedback(false, '', 'Copy room link'), 1800);

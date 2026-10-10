@@ -87,10 +87,13 @@ Play-before-CUED, local detached watching, and autoplay-unlock Play still work.
 Use two independent browser sessions so the guest does not inherit the host's
 session storage. Check desktop and a narrow mobile viewport.
 
-1. Unlock the site independently in both sessions, then create a room. Its address must immediately become the clean guest invite
+1. Unlock the site in the first session, then create a room. Its address must immediately become the clean room
    URL; it must not contain a host token or query parameters.
 2. Copy the link. The ghost icon briefly becomes a checkmark. Player position,
-   document height, and visible notices must not change. With clipboard access
+   document height, and visible notices must not change. The copied link includes
+   the saved site access key, but no Keeper/member credentials. Open it in a fresh
+   session: it must unlock automatically, clean the URL, and join as a Companion.
+   Without a saved key, copying yields a clean link. With clipboard access
    blocked, the accessible feedback points to the address bar.
 3. Load an embeddable YouTube video. It starts paused, with native controls and
    no custom seek field. The link input is above the player and has the same

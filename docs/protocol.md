@@ -51,7 +51,11 @@ key, and stores it in localStorage only after successful cookie verification.
 A remembered key can restore a missing cookie; invalid keys are cleared. URL
 keys alone **never** authorise room creation, APIs or upgrades. Use HTTPS publicly;
 proxy query logging/history remains a risk despite stripping and no-referrer.
-Room invites stay site-key-free; share site admission separately.
+The room's copy-invite button includes the valid site key saved in localStorage as
+`?access_token=…`, so new visitors can unlock directly. Treat copied invites as
+site-access credentials; they never include Keeper or member tokens. The address
+bar stays clean. Without a saved key, the copied link contains only the room URL
+and site admission must be shared separately.
 
 ## HTTP (after site admission)
 

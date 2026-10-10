@@ -797,6 +797,45 @@ test('storage blocking and clipboard denial have safe visible fallbacks', async 
   assert.equal(b.get('room-notice').textContent, '');
 });
 
+test('invite copy includes the current saved site key but never Keeper or member credentials', async () => {
+  const storage = new Map([['sameframe:access-token', 'b'.repeat(64)]]);
+  const b = await browser({ token: 'keeper-secret', memberStorage: storage,
+    query: '?access_token=ignored&tracking=x', pathname: '/room/test-room/' });
+  await b.welcome();
+
+  await b.click('copy-link');
+  const invite = new URL(b.copied);
+  assert.equal(invite.origin, 'https://sameframe.test');
+  assert.equal(invite.pathname, '/room/test-room');
+  assert.deepEqual([...invite.searchParams], [['access_token', 'b'.repeat(64)]]);
+  assert.equal(invite.hash, '');
+  assert.equal(b.copied.includes('keeper-secret'), false);
+  assert.equal(b.copied.includes(memberToken), false);
+  assert.deepEqual(b.historyCalls, [[null, '', '/room/test-room']]);
+
+  storage.set('sameframe:access-token', 'c'.repeat(64));
+  await b.click('copy-link');
+  assert.equal(new URL(b.copied).searchParams.get('access_token'), 'c'.repeat(64));
+});
+
+test('missing, malformed, or inaccessible site key leaves a clean room invite', async () => {
+  for (const key of [undefined, '', 'not-a-token', 'b'.repeat(63), 'B'.repeat(64)]) {
+    const storage = new Map();
+    if (key !== undefined) storage.set('sameframe:access-token', key);
+    const b = await browser({ memberStorage: storage });
+    await b.welcome();
+
+    await b.click('copy-link');
+    assert.equal(b.copied, 'https://sameframe.test/room/test-room');
+  }
+
+  const b = await browser({ storageBlocked: true,
+    memberStorage: new Map([['sameframe:access-token', 'b'.repeat(64)]]) });
+  await b.welcome();
+  await b.click('copy-link');
+  assert.equal(b.copied, 'https://sameframe.test/room/test-room');
+});
+
 test('native controls enabled; selected video initially paused; no duplicate handlers', async () => {
   const b = await browser();
   const ws = await b.welcome();

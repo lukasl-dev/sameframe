@@ -153,11 +153,11 @@ export class NativePlaybackObserver {
     this.state = null;
   }
 
-  suppress(playing, position, at, rate = 1) {
+  suppress(playing, position, at, rate = 1, allowNativePlay = true) {
     this.last = null;
     this.playing = playing;
     this.pauseCandidate = null;
-    this.operation = { playing, position, rate, at, until: at + 4000, settledAt: null, nativePlayAt: null };
+    this.operation = { playing, position, rate, at, until: at + 4000, settledAt: null, nativePlayAt: null, allowNativePlay };
   }
 
   get settling() { return this.operation !== null; }
@@ -180,7 +180,7 @@ export class NativePlaybackObserver {
       const expectedPosition = op.position === null || (position >= op.position - 0.75
         && position <= op.position + 0.75 + (state === 1 ? Math.max(0, at - op.at) / 1000 * op.rate : 0));
 
-      if (!op.playing && state === 1) {
+      if (!op.playing && state === 1 && op.allowNativePlay) {
         op.nativePlayAt ??= at;
         if (at - op.nativePlayAt >= 250) {
           this.operation = null;

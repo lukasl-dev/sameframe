@@ -8,6 +8,7 @@ const roomSource = (await readFile(new URL('../assets/room.js', import.meta.url)
   .replace('import(document.body.dataset.syncUrl)', 'Promise.resolve(sync)');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const id = 'dQw4w9WgXcQ';
+const memberToken = 'a'.repeat(96);
 
 const initial = (overrides = {}) => {
   const snapshot = { incarnation: 'a', room_name: 'The Sleepy Observatory', events: [], revision: 0, media_revision: 0, playback_rate: 1,
@@ -20,7 +21,7 @@ const initial = (overrides = {}) => {
 
 async function browser({ token = null, api = true, storageBlocked = false, importFailure = false,
   clipboardBlocked = false, query = '', pathname = '/room/test-room', rates = [0.5, 1, 1.5, 2],
-  unavailableInitialCaches = false } = {}) {
+  unavailableInitialCaches = false, memberStorage = new Map() } = {}) {
   let now = 1000;
   let timerId = 0;
   const timers = new Map();
@@ -72,6 +73,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
   class WebSocket {
     static OPEN = 1;
     static CONNECTING = 0;
+    static CLOSED = 3;
     constructor(url) { this.url = url; this.readyState = 0; this.events = {}; this.sent = []; sockets.push(this); }
     addEventListener(event, fn) { this.events[event] = fn; }
     send(value) { this.sent.push(JSON.parse(value)); }
@@ -189,13 +191,16 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
   const setTimeout = (fn, ms) => { const key = ++timerId; timers.set(key, { fn, ms }); return key; };
   const clearTimeout = (key) => timers.delete(key);
   const source = importFailure ? roomSource.replace('Promise.resolve(sync)', 'Promise.reject(new Error("missing"))') : roomSource;
-  await new AsyncFunction('sync', 'document', 'window', 'location', 'history', 'sessionStorage', 'performance',
+  await new AsyncFunction('sync', 'document', 'window', 'location', 'history', 'sessionStorage', 'localStorage', 'performance',
     'WebSocket', 'YT', 'globalThis', 'setTimeout', 'clearTimeout', 'setInterval', 'navigator', 'console', source)(
     sync, document, { addEventListener(event, fn) { windowEvents.set(event, fn); } },
     { origin: 'https://sameframe.test', host: 'sameframe.test', protocol: 'https:', pathname, search: query, hash: token ? `#host=${token}` : '' },
     { replaceState(...args) { historyCalls.push(args); } },
     { getItem(key) { if (storageBlocked) throw Error('blocked'); return stored.get(key) ?? null; },
       setItem(key, value) { if (storageBlocked) throw Error('blocked'); stored.set(key, value); } },
+    { getItem(key) { if (storageBlocked) throw Error('blocked'); return memberStorage.get(key) ?? null; },
+      setItem(key, value) { if (storageBlocked) throw Error('blocked'); memberStorage.set(key, value); },
+      removeItem(key) { if (storageBlocked) throw Error('blocked'); memberStorage.delete(key); } },
     { now: () => now }, WebSocket, YT, globals, setTimeout, clearTimeout,
     (fn, ms) => intervals.push({ fn, ms }), { clipboard: { async writeText(value) {
       if (clipboardBlocked) throw Error('denied'); copied = value;
@@ -213,7 +218,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     ws.testRole = role;
     snapshot.participants = snapshot.participants.map((member) => member.id === 1 ? { ...member, role } : member);
     ws.open();
-    ws.receive({ type: 'welcome', role, member_id: 1, snapshot, server_ms: now });
+    ws.receive({ type: 'welcome', role, member_id: 1, member_token: memberToken, snapshot, server_ms: now });
     await flush();
     return ws;
   };
@@ -244,7 +249,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     return snapshot;
   };
 
-  return { get, document, documentEvents, windowEvents, sockets, players, timers, intervals, stored, historyCalls, writes, warnings,
+  return { get, document, documentEvents, windowEvents, sockets, players, timers, intervals, stored, memberStorage, historyCalls, writes, warnings,
     welcome, ready, frame, tick, accept, state, flush, get copied() { return copied; },
     time(value) { now = value; },
     click(name) { return get(name).events.click?.({ preventDefault() {} }); },
@@ -261,6 +266,339 @@ const commands = (ws) => ws.sent.filter((message) => message.type === 'command')
 const socialCommands = (ws) => ws.sent.filter((message) => message.type === 'social');
 const event = (id, kind, overrides = {}) => ({ id, kind, at_ms: 1000, member_id: 1,
   name: 'Sleepy Waffle', avatar: '0123456789abcdef', text: null, video_id: null, position_secs: null, ...overrides });
+
+test('server-issued room identity survives reconnect and reload without granting Keeper access', async () => {
+  const memberStorage = new Map();
+  const b = await browser({ memberStorage });
+  const ws = await b.welcome(initial(), 'guest');
+
+  assert.equal(ws.sent[0].member_token, null);
+  assert.equal(memberStorage.get('sameframe:member:test-room'), memberToken);
+
+  ws.close();
+  b.click('reconnect-button');
+  const reconnected = await b.welcome(initial(), 'guest');
+  assert.deepEqual(reconnected.sent[0], { type: 'join', host_token: null, member_token: memberToken });
+
+  const reload = await browser({ memberStorage });
+  const fresh = await reload.welcome(initial(), 'guest');
+  assert.deepEqual(fresh.sent[0], { type: 'join', host_token: null, member_token: memberToken });
+  assert.equal(reload.get('role-label').textContent, 'You’re a Companion');
+  assert.equal(reload.historyCalls.length, 0);
+  await reload.click('copy-link');
+  assert.equal(reload.copied, 'https://sameframe.test/room/test-room');
+});
+
+test('blocked member storage keeps the current room identity in memory for reconnect', async () => {
+  const b = await browser({ storageBlocked: true });
+  const ws = await b.welcome(initial(), 'guest');
+  assert.equal(b.memberStorage.size, 0);
+
+  ws.close();
+  b.click('reconnect-button');
+  const resumed = await b.welcome(initial(), 'guest');
+  assert.equal(resumed.sent[0].member_token, memberToken);
+});
+
+test('rejected saved identity retries without it, but invalid Keeper access still stops', async () => {
+  const memberStorage = new Map([['sameframe:member:test-room', memberToken]]);
+  const b = await browser({ token: 'wrong-host', memberStorage });
+  const first = b.sockets[0];
+  first.open();
+  first.receive({ type: 'error', code: 'invalid_token', id: null });
+
+  assert.equal(b.sockets.length, 2);
+  assert.equal(memberStorage.size, 0);
+  const retry = b.sockets[1];
+  retry.open();
+  assert.deepEqual(retry.sent[0], { type: 'join', host_token: 'wrong-host', member_token: null });
+
+  retry.receive({ type: 'error', code: 'invalid_token', id: null });
+  assert.equal(b.get('connection-status').textContent, 'Host access rejected');
+  assert.equal(b.sockets.length, 2);
+});
+
+test('malformed identity storage and welcome tokens cannot become room credentials', async () => {
+  const memberStorage = new Map([['sameframe:member:test-room', 'not-a-token']]);
+  const b = await browser({ memberStorage });
+  const ws = b.sockets[0];
+  ws.open();
+  assert.equal(ws.sent[0].member_token, null);
+
+  for (const invalid of ['invalid', [memberToken], null, 123]) {
+    ws.receive({ type: 'welcome', role: 'guest', member_id: 1, member_token: invalid,
+      snapshot: initial(), server_ms: 1000 });
+  }
+  assert.equal(b.get('connection-status').textContent, 'Connecting…');
+  assert.equal(memberStorage.get('sameframe:member:test-room'), 'not-a-token');
+
+  ws.receive({ type: 'welcome', role: 'guest', member_id: 1, member_token: memberToken,
+    snapshot: initial(), server_ms: 1000 });
+  assert.equal(b.get('connection-status').textContent, 'Connected');
+  assert.equal(memberStorage.get('sameframe:member:test-room'), memberToken);
+});
+
+test('same-room reconnect applies a paused snapshot without echoing delayed corrections as Play or Pause', async () => {
+  for (const role of ['host', 'guest']) {
+    const b = await browser();
+    const old = await b.welcome(initial({ video_id: id, playing: true }), role);
+    const p = b.ready();
+
+    b.document.hidden = true;
+    b.documentEvents.get('visibilitychange')();
+    old.close();
+    b.click('reconnect-button');
+    const paused = initial({ video_id: id, playing: false, position_secs: 60, revision: 1 });
+    const ws = await b.welcome(paused, role);
+    b.document.hidden = false;
+    b.documentEvents.get('visibilitychange')();
+    b.frame(300, false);
+    assert.deepEqual(commands(ws), []);
+
+    b.state(ws, paused);
+    b.frame(300, false);
+    b.frame(300, false);
+    assert.deepEqual(commands(ws), []);
+    assert.equal(b.get('join-playback').hidden, true);
+
+    while (p.messages.length) {
+      p.messages.shift()();
+      b.frame(300, false);
+      assert.deepEqual(commands(ws), []);
+    }
+    b.frame(300, false);
+    assert.equal(p.state, 2);
+    assert.equal(p.time, 60);
+    assert.equal(b.get('join-playback').hidden, true);
+
+    p.userState(1);
+    if (role === 'host') assert.equal(commands(ws)[0].action.type, 'play');
+    else assert.equal(b.get('join-playback').hidden, false);
+  }
+});
+
+test('cached offline rate changes are corrected on reconnect instead of changing or detaching from the room', async () => {
+  for (const role of ['host', 'guest']) {
+    const b = await browser();
+    const old = await b.welcome(initial({ video_id: id }), role);
+    const p = b.ready();
+
+    b.document.hidden = true;
+    b.documentEvents.get('visibilitychange')();
+    old.close();
+    p.rate = 2;
+    p.time = 40;
+    b.click('reconnect-button');
+    const fresh = initial({ video_id: id, position_secs: 10, playback_rate: 1 });
+    const ws = await b.welcome(fresh, role);
+    b.document.hidden = false;
+    b.documentEvents.get('visibilitychange')();
+    b.state(ws, fresh);
+
+    b.frame(300, false);
+    b.frame(300, false);
+    assert.deepEqual(commands(ws), []);
+    p.deliver();
+    b.frame(300, false);
+    b.frame(300, false);
+    assert.equal(p.rate, 1);
+    assert.equal(p.time, 10);
+    assert.equal(b.get('join-playback').hidden, true);
+
+    p.userRate(1.5);
+    b.frame(300, false);
+    if (role === 'host') assert.deepEqual(commands(ws)[0].action, { type: 'set_rate', playback_rate: 1.5 });
+    else assert.equal(b.get('join-playback').hidden, false);
+  }
+});
+
+test('reconnecting to the same playing video reloads lost iframe media atomically', async () => {
+  const b = await browser();
+  const old = await b.welcome(initial({ video_id: id, playing: true }));
+  const p = b.ready();
+  const loads = p.loads.length;
+
+  old.close();
+  p.videoId = '';
+  p.state = -1;
+  b.click('reconnect-button');
+  const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 30 }));
+  assert.equal(p.loads.length, loads + 1);
+  assert.equal(p.seeks.length, 0);
+  p.deliver();
+  b.frame();
+  b.frame();
+
+  assert.equal(p.videoId, id);
+  assert.equal(p.state, 1);
+  assert.equal(b.get('room-error').hidden, true);
+  assert.deepEqual(commands(ws), []);
+});
+
+test('visibility recovery without disconnect also waits for fresh state and ignores old cached playback', async () => {
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id, playing: true }));
+  const p = b.ready();
+
+  b.document.hidden = true;
+  b.documentEvents.get('visibilitychange')();
+  p.rate = 2;
+  b.document.hidden = false;
+  b.documentEvents.get('visibilitychange')();
+  b.frame(300, false);
+  assert.deepEqual(commands(ws), []);
+
+  b.state(ws, initial({ video_id: id, playing: false, position_secs: 20, revision: 1 }));
+  b.frame(300, false);
+  b.frame(300, false);
+  p.deliver();
+  b.frame(300, false);
+  b.frame(300, false);
+  assert.deepEqual(commands(ws), []);
+  assert.equal(p.time, 20);
+  assert.equal(p.rate, 1);
+  assert.equal(p.state, 2);
+});
+
+test('returning to a closed socket reconnects immediately instead of waiting on a suspended retry timer', async () => {
+  const b = await browser();
+  const ws = await b.welcome(initial(), 'guest');
+
+  b.document.hidden = true;
+  ws.close();
+  assert.equal(b.sockets.length, 1);
+  b.document.hidden = false;
+  b.documentEvents.get('visibilitychange')();
+  assert.equal(b.sockets.length, 2);
+
+  const resumed = await b.welcome(initial(), 'guest');
+  assert.equal(resumed.sent[0].member_token, memberToken);
+});
+
+test('temporary unavailable media metadata does not reload an otherwise retained iframe on reconnect', async () => {
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const p = b.ready();
+  const cues = p.cues.length;
+  p.getVideoData = () => undefined;
+
+  ws.close();
+  b.click('reconnect-button');
+  const resumed = await b.welcome(initial({ video_id: id }));
+  b.frame(300, false);
+  assert.equal(p.cues.length, cues);
+  assert.deepEqual(commands(resumed), []);
+
+  p.getVideoData = () => ({ video_id: id });
+  b.frame(300, false);
+  p.userState(1);
+  assert.equal(commands(resumed)[0].action.type, 'play');
+});
+
+test('visibility recovery preserves intentional local watching for a detached Companion', async () => {
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id, playing: true }), 'guest');
+  const p = b.ready();
+  p.userState(2);
+  b.frame(300, false);
+  assert.equal(b.get('join-playback').hidden, false);
+
+  b.document.hidden = true;
+  b.document.hidden = false;
+  b.documentEvents.get('visibilitychange')();
+  b.state(ws, initial({ video_id: id, playing: true, position_secs: 20 }));
+  b.frame(300, false);
+  assert.equal(p.state, 2);
+  assert.equal(b.get('join-playback').hidden, false);
+
+  b.click('join-playback');
+  p.deliver();
+  b.frame();
+  b.frame();
+  assert.equal(p.state, 1);
+  assert.deepEqual(commands(ws), []);
+});
+
+test('visibility before selecting a video does not suppress the first native Play on a new iframe', async () => {
+  for (const role of ['host', 'guest']) {
+    const b = await browser();
+    const ws = await b.welcome(initial(), role);
+    b.documentEvents.get('visibilitychange')();
+    b.state(ws, initial());
+
+    b.state(ws, initial({ video_id: id, revision: 1, media_revision: 1 }));
+    await b.flush();
+    const p = b.players[0];
+    p.ready();
+    p.messages = [];
+    p.videoId = id;
+    p.userState(3);
+    b.frame(300, false);
+    p.userState(1);
+    b.frame(300, false);
+    b.frame(300, false);
+
+    if (role === 'host') assert.equal(commands(ws)[0].action.type, 'play');
+    else assert.equal(b.get('join-playback').hidden, false);
+  }
+});
+
+test('unavailable metadata is rechecked and later-confirmed lost media reloads without empty-video Play', async () => {
+  for (const playing of [false, true]) {
+    const b = await browser();
+    const ws = await b.welcome(initial({ video_id: id, playing }));
+    const p = b.ready();
+    const videos = p.videos.length;
+    p.videoId = '';
+    p.state = -1;
+    p.getVideoData = () => undefined;
+
+    ws.close();
+    b.click('reconnect-button');
+    const resumed = await b.welcome(initial({ video_id: id, playing, position_secs: 30 }));
+    b.frame(300, false);
+    assert.equal(p.videos.length, videos);
+    assert.equal(p.messages.length, 0);
+
+    p.getVideoData = () => ({ video_id: p.videoId });
+    b.frame(300, false);
+    assert.equal(p.videos.length, videos + 1);
+    p.deliver();
+    b.frame(300, false);
+    b.frame(300, false);
+
+    assert.equal(p.state, playing ? 1 : 2);
+    assert.equal(p.videoId, id);
+    assert.equal(b.get('room-error').hidden, true);
+    assert.deepEqual(commands(resumed), []);
+  }
+});
+
+test('native autoplay-unlock Play during recovery rejoins locally instead of leaving stale blocked state', async () => {
+  for (const role of ['host', 'guest']) {
+    for (const delayedCache of [false, true]) {
+      const b = await browser();
+      const old = await b.welcome(initial({ video_id: id, playing: true }), role);
+      const p = b.ready();
+      old.close();
+      b.click('reconnect-button');
+      const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 20 }), role);
+      p.messages = [];
+      p.time = 20;
+      p.state = 2;
+      p.options.events.onAutoplayBlocked();
+
+      p.userState(1, delayedCache);
+      p.deliver();
+      b.frame();
+      b.frame();
+      assert.equal(p.state, 1);
+      assert.equal(b.get('join-playback').hidden, true);
+      assert.equal(b.get('room-notice').textContent, '');
+      assert.deepEqual(commands(ws), []);
+    }
+  }
+});
 
 test('Companions suggest videos without playback commands and chat drafts clear only on their own ack', async () => {
   const b = await browser();
@@ -440,7 +778,7 @@ test('credentials, clean canonical address and icon-only invite copy remain safe
 
   assert.equal(b.stored.get('sameframe:host:test-room'), 'secret');
   assert.deepEqual(b.historyCalls[0], [null, '', '/room/test-room']);
-  assert.deepEqual(ws.sent[0], { type: 'join', host_token: 'secret' });
+  assert.deepEqual(ws.sent[0], { type: 'join', host_token: 'secret', member_token: null });
 
   await b.click('copy-link');
   assert.equal(b.copied, 'https://sameframe.test/room/test-room');

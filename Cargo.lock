@@ -1309,6 +1309,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
+ "hmac",
  "http",
  "rand 0.10.3",
  "serde",

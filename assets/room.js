@@ -10,7 +10,9 @@ const roomId = document.body.dataset.roomId;
 const roomPath = `/room/${encodeURIComponent(roomId ?? '')}`;
 const shareUrl = `${location.origin}${roomPath}`;
 const tokenKey = `sameframe:host:${roomId}`;
+const memberKey = `sameframe:member:${roomId}`;
 let hostToken = null;
+let memberToken = null;
 
 const fragmentToken = new URLSearchParams(location.hash.slice(1)).get('host');
 if (location.hash || location.search || location.pathname !== roomPath) history.replaceState(null, '', roomPath);
@@ -18,6 +20,11 @@ try {
   if (fragmentToken) sessionStorage.setItem(tokenKey, fragmentToken);
   hostToken = fragmentToken || sessionStorage.getItem(tokenKey);
 } catch { hostToken = fragmentToken; }
+
+try {
+  const saved = localStorage.getItem(memberKey);
+  if (/^[0-9a-f]{96}$/.test(saved ?? '')) memberToken = saved;
+} catch {}
 
 const helpers = await import(document.body.dataset.syncUrl).catch(() => {
   text('room-error', 'The room client could not load. Reload this page to retry.');
@@ -85,6 +92,8 @@ if (helpers) {
   let lastSeekMs = -Infinity;
   let forceSeek = false;
   let recoverySeek = false;
+  let recoveringPlayer = false;
+  let recoveryMediaChecked = false;
   let apiPromise = null;
   let localRate = 1;
   let rateGuard = null;
@@ -356,6 +365,17 @@ if (helpers) {
     rateEvent = null;
   }
 
+  function beginPlayerRecovery() {
+    discardIntents();
+    recoveringPlayer = true;
+    recoveryMediaChecked = false;
+    forceSeek = true;
+    recoverySeek = true;
+    buffering = false;
+    clearTimeout(autoplayTimer);
+    autoplayTimer = null;
+  }
+
   function ping() {
     if (!connected) return;
     const clientMs = performance.now();
@@ -423,7 +443,9 @@ if (helpers) {
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/rooms/${encodeURIComponent(roomId)}/ws`);
     socket = ws;
     joinTimer = setTimeout(() => { if (socket === ws) ws.close(); }, 10000);
-    ws.addEventListener('open', () => { if (socket === ws) send({ type: 'join', host_token: hostToken }); });
+    ws.addEventListener('open', () => {
+      if (socket === ws) send({ type: 'join', host_token: hostToken, member_token: memberToken });
+    });
     ws.addEventListener('message', (event) => {
       if (socket !== ws || terminal) return;
       let message;
@@ -433,18 +455,25 @@ if (helpers) {
       if (message.type === 'welcome' || message.type === 'snapshot') {
         const welcome = message.type === 'welcome';
         if (welcome && (!['host', 'moderator', 'guest'].includes(message.role)
-          || !Number.isSafeInteger(message.member_id) || message.member_id <= 0)) return;
+          || !Number.isSafeInteger(message.member_id) || message.member_id <= 0
+          || (message.member_token !== undefined && (typeof message.member_token !== 'string'
+            || !/^[0-9a-f]{96}$/.test(message.member_token))))) return;
         if (!welcome && !connected) return;
         if (!ordering.accept(message.snapshot, message.server_ms, welcome)) return;
         const previousSnapshot = snapshot;
         const update = playbackUpdate(snapshot, message.snapshot);
         if (welcome) {
+          if (playerReady) beginPlayerRecovery();
           clearTimeout(joinTimer);
           connected = true;
           reconnectAttempt = 0;
           connection = 'Connected';
           role = message.role;
           memberId = message.member_id;
+          if (message.member_token !== undefined) {
+            memberToken = message.member_token;
+            try { localStorage.setItem(memberKey, memberToken); } catch {}
+          }
           roomError = '';
           if (!autoplayBlocked) notice = '';
         }
@@ -514,6 +543,12 @@ if (helpers) {
           return;
         }
         if (message.code === 'invalid_token') {
+          if (memberToken) {
+            memberToken = null;
+            try { localStorage.removeItem(memberKey); } catch {}
+            connect();
+            return;
+          }
           stopUnavailable('Host access could not be verified. Open the original host link, or join using a shared guest link in another tab.');
           connection = 'Host access rejected';
           render();
@@ -630,6 +665,8 @@ if (helpers) {
     rateEvent = null;
     forceSeek = false;
     recoverySeek = false;
+    recoveringPlayer = false;
+    recoveryMediaChecked = false;
     lastSeekMs = -Infinity;
 
     try { previous?.destroy(); } catch {}
@@ -799,12 +836,55 @@ if (helpers) {
   function updatePlayer(eventState, eventRate) {
     if (!connected || !playerReady || document.hidden) return;
     try {
+      if (recoveringPlayer) {
+        if (awaitingSync || !snapshot?.video_id) return;
+        if (detached) {
+          recoveringPlayer = false;
+          return;
+        }
+        if (!recoveryMediaChecked) {
+          const cachedVideo = player.getVideoData?.()?.video_id;
+          if (typeof cachedVideo === 'string' && (cachedVideo || player.getPlayerState() === YT.PlayerState.UNSTARTED)) {
+            if (cachedVideo !== snapshot.video_id) loadedVideo = null;
+            recoveryMediaChecked = true;
+          } else if (player.getPlayerState() === YT.PlayerState.UNSTARTED || !cachedVideo && snapshot.playing) {
+            return;
+          }
+          if (recoveryMediaChecked) {
+            const rate = player.getPlaybackRate?.();
+            if (Number.isFinite(rate)) localRate = rate;
+          }
+        }
+
+        observeRate(eventRate);
+        const intent = native.observe(player.getCurrentTime(), eventState ?? player.getPlayerState(),
+          performance.now(), eventState !== undefined, localRate);
+        if (autoplayBlocked && intent?.playing && intent.kind === 'state'
+          && player.getVideoData?.()?.video_id === snapshot.video_id) {
+          rejoin();
+          return;
+        }
+        buffering = native.state === YT.PlayerState.BUFFERING;
+        reconcile();
+        const state = player.getPlayerState();
+        const atEnd = snapshot.playing && state === YT.PlayerState.ENDED
+          && player.getDuration() > 0
+          && targetPosition(snapshot, clock.serverNow(performance.now())) >= player.getDuration() - 1;
+        if (!native.settling && !rateGuard && !native.waiting
+          && player.getVideoData?.()?.video_id === snapshot.video_id
+          && (autoplayBlocked || atEnd || state === (snapshot.playing ? YT.PlayerState.PLAYING : YT.PlayerState.PAUSED)
+            || (!snapshot.playing && state === YT.PlayerState.CUED))) {
+          recoveringPlayer = false;
+        }
+        return;
+      }
       observeNative(eventState, eventRate);
       flushIntent();
       reconcile();
     } catch (error) {
       let cause = String(error?.message ?? error);
       if (hostToken) cause = cause.split(hostToken).join('[redacted]');
+      if (memberToken) cause = cause.split(memberToken).join('[redacted]');
       cause = cause.replace(/([#?&]host=)[^\s&]+/g, '$1[redacted]');
       console.warn('YouTube synchronization failed:', cause);
       playerError = 'The YouTube player could not synchronize. Retry playback on this device.';
@@ -832,7 +912,8 @@ if (helpers) {
     recoverySeek = false;
     if (!newVideo && !seek && !play && !pause) return;
 
-    native.suppress(snapshot.playing, newVideo || seek ? target : null, now, localRate);
+    native.suppress(snapshot.playing, newVideo || seek ? target : null, now, localRate,
+      !recoveringPlayer && state !== YT.PlayerState.PLAYING);
     if (newVideo) {
       loadedVideo = snapshot.video_id;
       if (snapshot.playing && !autoplayBlocked) {
@@ -948,8 +1029,13 @@ if (helpers) {
   });
 
   document.addEventListener('visibilitychange', () => {
-    native.reset();
-    recoverySeek = true;
+    if (document.hidden) return;
+    if (playerReady) beginPlayerRecovery();
+    if (!connected) {
+      if (!terminal && socket?.readyState === WebSocket.CLOSED) connect();
+      return;
+    }
+    awaitingSync = true;
     recover();
   });
   window.addEventListener('online', () => {

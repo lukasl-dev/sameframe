@@ -66,6 +66,22 @@ separate social acknowledgements, preserved drafts, suggestion approval,
 Co-keeper playback, revoked authority, and chat scroll anchoring. Buffering must
 never create a banner; routine notices occupy the fixed-height player caption.
 
+## Reconnect regressions
+
+Backend and socket tests check room-scoped signed identity tokens: stable name and
+avatar across reconnects, fresh membership IDs, separate permissions/retry budgets,
+invalid/cross-room rejection, concurrent tabs, and no token in public snapshots.
+Browser tests check localStorage persistence, blocked-storage fallback, and one
+fresh-identity retry without losing or granting Keeper access.
+
+Playback harness tests delay corrective iframe writes across multiple samples and
+deliver them one callback at a time. Same-incarnation welcomes must not fabricate
+Play/Pause/Seek commands or detach Companions. Offline cached rate changes restore
+the authoritative rate instead of sending commands. Visibility recovery waits for
+fresh state, confirmed media loss reloads atomically, and undefined metadata is
+rechecked rather than treated as loss. Native controls work after recovery; initial
+Play-before-CUED, local detached watching, and autoplay-unlock Play still work.
+
 ## Browser smoke test
 
 Use two independent browser sessions so the guest does not inherit the host's

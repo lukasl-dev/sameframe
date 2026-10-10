@@ -147,6 +147,7 @@ async fn room_socket(cx: &Cx, upgrade: WebSocketUpgrade) -> Result<Response> {
 enum ClientMessage {
     Join {
         host_token: Option<String>,
+        member_token: Option<String>,
     },
     Ping {
         client_ms: f64,
@@ -168,6 +169,7 @@ enum ClientMessage {
 enum ServerMessage {
     Welcome {
         member_id: u64,
+        member_token: String,
         role: Role,
         snapshot: Snapshot,
         server_ms: u64,
@@ -199,12 +201,16 @@ async fn serve_member(mut socket: WebSocket, room: RoomHandle, rooms: Rooms) {
     let Ok(Some(Ok(Message::Text(text)))) = timeout(JOIN_TIMEOUT, socket.recv()).await else {
         return;
     };
-    let Ok(ClientMessage::Join { host_token }) = serde_json::from_str(&text) else {
+    let Ok(ClientMessage::Join {
+        host_token,
+        member_token,
+    }) = serde_json::from_str(&text)
+    else {
         close_socket(&mut socket, 1008, "First message must join the room").await;
         return;
     };
 
-    let member = match room.join(host_token).await {
+    let member = match room.join(host_token, member_token).await {
         Ok(member) => member,
         Err(error) => {
             let _ = send_socket(&mut socket, &failure(error, None)).await;
@@ -216,6 +222,7 @@ async fn serve_member(mut socket: WebSocket, room: RoomHandle, rooms: Rooms) {
     let mut snapshots = member.snapshots;
     let welcome = ServerMessage::Welcome {
         member_id: member.id,
+        member_token: member.member_token,
         role: member.role,
         snapshot: snapshots.borrow_and_update().clone(),
         server_ms: rooms.now_ms(),
@@ -481,6 +488,60 @@ mod tests {
 
         assert!(!limits.allow_creation(ip));
         assert!(limits.allow_creation(Some("127.0.0.2".parse().unwrap())));
+    }
+
+    #[tokio::test]
+    async fn member_tokens_are_optional_on_join_and_private_to_welcome() {
+        for wire in [r#"{"type":"join"}"#, r#"{"type":"join","host_token":null}"#] {
+            assert!(matches!(
+                serde_json::from_str::<ClientMessage>(wire).unwrap(),
+                ClientMessage::Join {
+                    host_token: None,
+                    member_token: None
+                }
+            ));
+        }
+        assert!(
+            matches!(serde_json::from_str::<ClientMessage>(r#"{"type":"join","member_token":"identity"}"#).unwrap(),
+            ClientMessage::Join { host_token: None, member_token: Some(token) } if token == "identity")
+        );
+        assert!(
+            serde_json::from_str::<ClientMessage>(r#"{"type":"join","member_token":42}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<ClientMessage>(
+                r#"{"type":"join","member_token":"identity","extra":true}"#
+            )
+            .is_err()
+        );
+
+        let rooms = Rooms::new();
+        let created = rooms.create().unwrap();
+        let room = rooms.get(&created.room_id).unwrap();
+        let member = room.join(None, None).await.unwrap();
+        let snapshot = member.snapshots.borrow().clone();
+        let token = member.member_token.clone();
+        let server_ms = rooms.now_ms();
+
+        let welcome = serde_json::to_value(ServerMessage::Welcome {
+            member_id: member.id,
+            member_token: token.clone(),
+            role: member.role,
+            snapshot: snapshot.clone(),
+            server_ms,
+        })
+        .unwrap();
+        assert_eq!(welcome.as_object().unwrap().len(), 6);
+        assert_eq!(welcome["member_token"], token);
+        assert!(!welcome["snapshot"].to_string().contains(&token));
+
+        let update = serde_json::to_value(ServerMessage::Snapshot {
+            snapshot,
+            server_ms,
+        })
+        .unwrap();
+        assert!(update.get("member_token").is_none());
+        assert!(!update.to_string().contains(&token));
     }
 
     #[test]

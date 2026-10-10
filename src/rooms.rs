@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use tokio::{
     sync::{Notify, mpsc, oneshot, watch},
     time::Instant,
@@ -48,6 +50,7 @@ pub(crate) struct RoomHandle {
 pub(crate) struct Membership {
     pub(crate) id: u64,
     pub(crate) role: Role,
+    pub(crate) member_token: String,
     pub(crate) snapshots: watch::Receiver<Snapshot>,
     _lease: Lease,
 }
@@ -227,9 +230,17 @@ impl Rooms {
 }
 
 impl RoomHandle {
-    pub(crate) async fn join(&self, host_token: Option<String>) -> Result<Membership, RoomError> {
+    pub(crate) async fn join(
+        &self,
+        host_token: Option<String>,
+        member_token: Option<String>,
+    ) -> Result<Membership, RoomError> {
         let (reply, response) = oneshot::channel();
-        self.enqueue(Request::Join { host_token, reply })?;
+        self.enqueue(Request::Join {
+            host_token,
+            member_token,
+            reply,
+        })?;
         response.await.map_err(|_| UNAVAILABLE)?
     }
 
@@ -378,6 +389,7 @@ impl Drop for Lease {
 enum Request {
     Join {
         host_token: Option<String>,
+        member_token: Option<String>,
         reply: oneshot::Sender<Result<Membership, RoomError>>,
     },
     Command {
@@ -437,6 +449,7 @@ struct AppliedCommand {
 
 struct RoomActor {
     host_token: String,
+    identity_key: [u8; 32],
     name_offset: u8,
     name_stride: u8,
     departures: Arc<Departures>,
@@ -475,6 +488,7 @@ impl RoomActor {
         let (snapshots, _) = watch::channel(snapshot.clone());
         Self {
             host_token,
+            identity_key: rand::random(),
             name_offset: rand::random(),
             name_stride: rand::random::<u8>() | 1,
             departures,
@@ -511,9 +525,9 @@ impl RoomActor {
                     let Some(request) = request else { break };
                     self.remove_departed();
                     match request {
-                        Request::Join { host_token, reply } => {
+                        Request::Join { host_token, member_token, reply } => {
                             if !reply.is_closed() {
-                                let result = self.join(host_token);
+                                let result = self.join(host_token, member_token);
                                 let _ = reply.send(result);
                             }
                         }
@@ -531,19 +545,34 @@ impl RoomActor {
         }
     }
 
-    fn join(&mut self, host_token: Option<String>) -> Result<Membership, RoomError> {
+    fn join(
+        &mut self,
+        host_token: Option<String>,
+        member_token: Option<String>,
+    ) -> Result<Membership, RoomError> {
         let role = match host_token {
             None => Role::Guest,
             Some(token) if token == self.host_token => Role::Host,
             Some(_) => return Err(INVALID_TOKEN),
         };
-        if self.members.len() >= MAX_MEMBERS {
-            return Err(BUSY);
-        }
-
         let id = self.next_member_id;
         let next_member_id = id.checked_add(1).ok_or(UNAVAILABLE)?;
         self.next_event_id.checked_add(1).ok_or(UNAVAILABLE)?;
+
+        let (ordinal, avatar, member_token) = match member_token {
+            Some(token) => {
+                let (ordinal, avatar) = self.resume_identity(&token)?;
+                (ordinal, avatar, token)
+            }
+            None => {
+                let avatar = random_secret()[..16].to_owned();
+                let token = self.sign_identity(id, &avatar);
+                (id, avatar, token)
+            }
+        };
+        if self.members.len() >= MAX_MEMBERS {
+            return Err(BUSY);
+        }
 
         self.next_member_id = next_member_id;
         let active = Arc::new(AtomicBool::new(true));
@@ -556,8 +585,8 @@ impl RoomActor {
             id,
             Member {
                 role,
-                name: member_name(id, self.name_offset, self.name_stride),
-                avatar: random_secret()[..16].to_owned(),
+                name: member_name(ordinal, self.name_offset, self.name_stride),
+                avatar,
                 active: active.clone(),
                 tokens: COMMAND_BURST,
                 refilled_at: Instant::now(),
@@ -572,12 +601,51 @@ impl RoomActor {
         Ok(Membership {
             id,
             role,
+            member_token,
             snapshots: self.snapshots.subscribe(),
             _lease: Lease {
                 active,
                 departures: self.departures.clone(),
             },
         })
+    }
+
+    fn sign_identity(&self, ordinal: u64, avatar: &str) -> String {
+        let mut token = format!("{ordinal:016x}{avatar}");
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.identity_key).expect("valid HMAC key");
+        mac.update(token.as_bytes());
+        for byte in mac.finalize().into_bytes() {
+            token.push_str(&format!("{byte:02x}"));
+        }
+        token
+    }
+
+    fn resume_identity(&self, token: &str) -> Result<(u64, String), RoomError> {
+        if token.len() != 96
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(INVALID_TOKEN);
+        }
+
+        let mut signature = [0; 32];
+        for (byte, pair) in signature
+            .iter_mut()
+            .zip(token.as_bytes()[32..].as_chunks::<2>().0)
+        {
+            let pair = std::str::from_utf8(pair).map_err(|_| INVALID_TOKEN)?;
+            *byte = u8::from_str_radix(pair, 16).map_err(|_| INVALID_TOKEN)?;
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.identity_key).expect("valid HMAC key");
+        mac.update(&token.as_bytes()[..32]);
+        mac.verify_slice(&signature).map_err(|_| INVALID_TOKEN)?;
+
+        let ordinal = u64::from_str_radix(&token[..16], 16).map_err(|_| INVALID_TOKEN)?;
+        if ordinal == 0 {
+            return Err(INVALID_TOKEN);
+        }
+        Ok((ordinal, token[16..32].to_owned()))
     }
 
     fn remove_departed(&mut self) {
@@ -932,7 +1000,7 @@ mod tests {
     async fn host_room(rooms: &Rooms) -> (RoomHandle, Membership) {
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
-        let host = room.join(Some(created.host_token)).await.unwrap();
+        let host = room.join(Some(created.host_token), None).await.unwrap();
         (room, host)
     }
 
@@ -960,7 +1028,7 @@ mod tests {
         assert_ne!(created.room_id, created.host_token);
 
         let room = clone.get(&created.room_id).unwrap();
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let initial = guest.snapshots.borrow().clone();
 
         assert!(initial.anchor_ms >= before);
@@ -981,7 +1049,10 @@ mod tests {
         let rooms = Rooms::new();
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
-        let host = room.join(Some(created.host_token.clone())).await.unwrap();
+        let host = room
+            .join(Some(created.host_token.clone()), None)
+            .await
+            .unwrap();
         let first = host.snapshots.borrow().participants[0].clone();
 
         assert_eq!(first.id, host.id);
@@ -990,7 +1061,7 @@ mod tests {
         assert!(first.avatar.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first.avatar, created.host_token);
 
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let joined = host.snapshots.borrow().clone();
         assert_eq!(joined.members, joined.participants.len());
         assert_eq!(joined.participants[0], first);
@@ -1018,16 +1089,343 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identity_survives_disconnect_and_concurrent_resumes_without_retaining_members() {
+        let rooms = Rooms::new();
+        let created = rooms.create().unwrap();
+        let room = rooms.get(&created.room_id).unwrap();
+        let original = room.join(None, None).await.unwrap();
+        let author = original.snapshots.borrow().participants[0].clone();
+        let token = original.member_token.clone();
+        let original_id = original.id;
+
+        assert_eq!(token.len(), 96);
+        assert!(
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(&token[..16], format!("{original_id:016x}"));
+        assert_eq!(&token[16..32], author.avatar);
+        assert!(
+            !serde_json::to_string(&*original.snapshots.borrow())
+                .unwrap()
+                .contains(&token)
+        );
+
+        drop(original);
+        settle().await;
+        let returning = room.join(None, Some(token.clone())).await.unwrap();
+        let resumed = returning.snapshots.borrow().clone();
+
+        assert_ne!(returning.id, original_id);
+        assert_eq!(returning.member_token, token);
+        assert_eq!(returning.role, Role::Guest);
+        assert_eq!(resumed.members, 1);
+        assert_eq!(resumed.participants[0].name, author.name);
+        assert_eq!(resumed.participants[0].avatar, author.avatar);
+        assert_eq!(resumed.participants[0].id, returning.id);
+
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            vec![FeedKind::Joined, FeedKind::Left, FeedKind::Joined]
+        );
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .map(|entry| entry.member_id)
+                .collect::<Vec<_>>(),
+            vec![original_id, original_id, returning.id]
+        );
+        assert!(
+            resumed
+                .events
+                .iter()
+                .all(|entry| entry.name == author.name && entry.avatar == author.avatar)
+        );
+        assert!(!serde_json::to_string(&resumed).unwrap().contains(&token));
+
+        let concurrent = room.join(None, Some(token.clone())).await.unwrap();
+        let together = concurrent.snapshots.borrow().clone();
+
+        assert_ne!(concurrent.id, returning.id);
+        assert_eq!(together.members, 2);
+        assert!(
+            together
+                .participants
+                .iter()
+                .all(|participant| participant.name == author.name
+                    && participant.avatar == author.avatar)
+        );
+        assert!(!serde_json::to_string(&together).unwrap().contains(&token));
+
+        room.leave(original_id);
+        drop(returning);
+        settle().await;
+        assert_eq!(concurrent.snapshots.borrow().members, 1);
+        assert_eq!(
+            concurrent.snapshots.borrow().participants[0].id,
+            concurrent.id
+        );
+    }
+
+    #[tokio::test]
+    async fn identities_reject_cross_room_forged_and_malformed_tokens_without_role_fallback() {
+        let rooms = Rooms::new();
+        let created = rooms.create().unwrap();
+        let room = rooms.get(&created.room_id).unwrap();
+        let host = room
+            .join(Some(created.host_token.clone()), None)
+            .await
+            .unwrap();
+        let token = host.member_token.clone();
+        let before = host.snapshots.borrow().clone();
+
+        let other_created = rooms.create().unwrap();
+        let other = rooms.get(&other_created.room_id).unwrap();
+        assert_eq!(
+            other.join(None, Some(token.clone())).await.err(),
+            Some(INVALID_TOKEN)
+        );
+        assert_eq!(
+            room.join(Some(token.clone()), None).await.err(),
+            Some(INVALID_TOKEN)
+        );
+
+        let mut invalid = vec![
+            String::new(),
+            "0".repeat(95),
+            "0".repeat(97),
+            "0".repeat(4096),
+            "é".repeat(48),
+            format!("A{}", &token[1..]),
+            format!("g{}", &token[1..]),
+            created.host_token.clone(),
+        ];
+        for index in [0, 15, 16, 31, 32, 95] {
+            let mut forged = token.clone();
+            let replacement = if &forged[index..index + 1] == "0" {
+                "1"
+            } else {
+                "0"
+            };
+            forged.replace_range(index..index + 1, replacement);
+            invalid.push(forged);
+        }
+
+        for identity in invalid {
+            for host_token in [None, Some(created.host_token.clone())] {
+                assert_eq!(
+                    room.join(host_token, Some(identity.clone())).await.err(),
+                    Some(INVALID_TOKEN)
+                );
+                assert_eq!(*host.snapshots.borrow(), before);
+            }
+        }
+        assert_eq!(
+            room.join(Some("wrong".into()), Some(token.clone()))
+                .await
+                .err(),
+            Some(INVALID_TOKEN)
+        );
+
+        let resumed = room.join(None, Some(token)).await.unwrap();
+        assert_eq!(resumed.id, host.id + 1);
+        assert_eq!(resumed.role, Role::Guest);
+        assert_eq!(resumed.snapshots.borrow().members, 2);
+    }
+
+    #[tokio::test]
+    async fn reconnect_restores_identity_but_never_host_or_moderator_authority() {
+        let rooms = Rooms::new();
+        let created = rooms.create().unwrap();
+        let room = rooms.get(&created.room_id).unwrap();
+        let host = room
+            .join(Some(created.host_token.clone()), None)
+            .await
+            .unwrap();
+        let guest = room.join(None, None).await.unwrap();
+        let guest_identity = guest.snapshots.borrow().participants[1].clone();
+
+        room.social(
+            host.id,
+            "grant".into(),
+            SocialAction::SetModerator {
+                member_id: guest.id,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            host.snapshots.borrow().participants[1].role,
+            Role::Moderator
+        );
+        assert_eq!(
+            room.command(guest.id, "load".into(), 0, video()).await,
+            Ok(1)
+        );
+
+        let guest_token = guest.member_token.clone();
+        let old_guest_id = guest.id;
+        drop(guest);
+        let returning = room.join(None, Some(guest_token)).await.unwrap();
+        let resumed = returning.snapshots.borrow().clone();
+        let participant = resumed
+            .participants
+            .iter()
+            .find(|participant| participant.id == returning.id)
+            .unwrap();
+
+        assert_ne!(returning.id, old_guest_id);
+        assert_eq!(returning.role, Role::Guest);
+        assert_eq!(participant.role, Role::Guest);
+        assert_eq!(participant.name, guest_identity.name);
+        assert_eq!(participant.avatar, guest_identity.avatar);
+        assert_eq!(
+            room.command(returning.id, "load".into(), 0, video()).await,
+            Err(FORBIDDEN)
+        );
+        assert_eq!(
+            room.social(
+                returning.id,
+                "grant".into(),
+                SocialAction::SetModerator {
+                    member_id: host.id,
+                    enabled: true,
+                }
+            )
+            .await,
+            Err(FORBIDDEN)
+        );
+
+        let host_token = host.member_token.clone();
+        let host_identity = resumed.participants[0].clone();
+        drop(host);
+        let former_host = room.join(None, Some(host_token.clone())).await.unwrap();
+        assert_eq!(former_host.role, Role::Guest);
+        assert_eq!(
+            room.command(former_host.id, "load".into(), 0, video())
+                .await,
+            Err(FORBIDDEN)
+        );
+
+        let keeper = room
+            .join(Some(created.host_token), Some(host_token))
+            .await
+            .unwrap();
+        let keeper_identity = keeper
+            .snapshots
+            .borrow()
+            .participants
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(keeper.role, Role::Host);
+        assert_eq!(keeper_identity.name, host_identity.name);
+        assert_eq!(keeper_identity.avatar, host_identity.avatar);
+        assert_eq!(
+            room.command(keeper.id, "load".into(), 1, video()).await,
+            Ok(2)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_uses_new_rate_budgets_and_cannot_borrow_prior_command_or_social_replays() {
+        let rooms = test_rooms(EMPTY_TTL);
+        let created = rooms.create().unwrap();
+        let room = rooms.get(&created.room_id).unwrap();
+        let host = room
+            .join(Some(created.host_token.clone()), None)
+            .await
+            .unwrap();
+        let token = host.member_token.clone();
+        let old_id = host.id;
+        let message = SocialAction::Message {
+            text: "hello".into(),
+        };
+
+        assert_eq!(
+            room.command(host.id, "load".into(), 0, video()).await,
+            Ok(1)
+        );
+        let event_id = room
+            .social(host.id, "chat".into(), message.clone())
+            .await
+            .unwrap();
+        for _ in 0..18 {
+            assert_eq!(
+                room.social(host.id, "chat".into(), message.clone()).await,
+                Ok(event_id)
+            );
+        }
+        assert_eq!(
+            room.command(host.id, "over".into(), 1, video()).await,
+            Err(BUSY)
+        );
+
+        drop(host);
+        let returning = room
+            .join(Some(created.host_token), Some(token))
+            .await
+            .unwrap();
+        assert_ne!(returning.id, old_id);
+        assert_eq!(
+            room.command(returning.id, "load".into(), 0, video()).await,
+            Err(STALE_REVISION)
+        );
+        assert_eq!(
+            room.command(returning.id, "load".into(), 1, video()).await,
+            Ok(2)
+        );
+        let fresh_event = room
+            .social(returning.id, "chat".into(), message.clone())
+            .await
+            .unwrap();
+        assert_ne!(fresh_event, event_id);
+        assert_eq!(
+            returning
+                .snapshots
+                .borrow()
+                .events
+                .last()
+                .unwrap()
+                .member_id,
+            returning.id
+        );
+
+        for _ in 0..17 {
+            assert_eq!(
+                room.social(returning.id, "chat".into(), message.clone())
+                    .await,
+                Ok(fresh_event)
+            );
+        }
+        assert_eq!(
+            room.social(returning.id, "over".into(), message).await,
+            Err(BUSY)
+        );
+        assert_eq!(
+            room.command(old_id, "load".into(), 0, video()).await,
+            Err(FORBIDDEN)
+        );
+    }
+
+    #[tokio::test]
     async fn authentication_precedes_validation_revision_and_dedupe() {
         let rooms = Rooms::new();
         let (room, host) = host_room(&rooms).await;
 
         assert_eq!(host.role, Role::Host);
         assert_eq!(
-            room.join(Some("wrong".into())).await.err(),
+            room.join(Some("wrong".into()), None).await.err(),
             Some(INVALID_TOKEN)
         );
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         assert_eq!(guest.role, Role::Guest);
 
         assert_eq!(
@@ -1090,7 +1488,7 @@ mod tests {
         assert_eq!(playing.position_secs, 12.5);
 
         tokio::time::advance(Duration::from_secs(3)).await;
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let joined = guest.snapshots.borrow().clone();
         assert_eq!(joined.anchor_ms, playing.anchor_ms);
         assert_eq!(joined.revision, playing.revision);
@@ -1208,7 +1606,7 @@ mod tests {
         );
         assert_eq!(*host.snapshots.borrow(), double);
 
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let joined = guest.snapshots.borrow().clone();
         assert_eq!(joined.anchor_ms, double.anchor_ms);
         assert_eq!(joined.position_secs, double.position_secs);
@@ -1318,7 +1716,7 @@ mod tests {
             room.command(host.id, "load".into(), 0, video()).await,
             Ok(1)
         );
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let initial = host.snapshots.borrow().clone();
         assert_eq!(
             room.command(
@@ -1456,7 +1854,7 @@ mod tests {
             assert_eq!(host.snapshots.borrow().media_revision, 1);
         }
 
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         assert_eq!(guest.snapshots.borrow().media_revision, 1);
         assert_eq!(guest.snapshots.borrow().revision, 4);
 
@@ -1696,15 +2094,25 @@ mod tests {
         let (room, host) = host_room(&rooms).await;
         let mut guests = Vec::new();
         for _ in 1..MAX_MEMBERS {
-            guests.push(room.join(None).await.unwrap());
+            guests.push(room.join(None, None).await.unwrap());
         }
         assert_eq!(host.snapshots.borrow().members, MAX_MEMBERS);
-        assert_eq!(room.join(None).await.err(), Some(BUSY));
+        assert_eq!(room.join(None, None).await.err(), Some(BUSY));
+        assert_eq!(
+            room.join(None, Some(host.member_token.clone())).await.err(),
+            Some(BUSY)
+        );
+        assert_eq!(host.snapshots.borrow().members, MAX_MEMBERS);
+        assert_eq!(
+            room.join(None, Some("wrong".into())).await.err(),
+            Some(INVALID_TOKEN)
+        );
+        assert_eq!(host.snapshots.borrow().members, MAX_MEMBERS);
 
         let guest = guests.pop().unwrap();
         room.leave(guest.id);
         room.leave(guest.id);
-        let replacement = room.join(None).await.unwrap();
+        let replacement = room.join(None, None).await.unwrap();
         assert_ne!(guest.id, replacement.id);
 
         drop(guest);
@@ -1789,11 +2197,11 @@ mod tests {
         settle().await;
         assert!(room.sender.is_closed());
         assert!(rooms.get(&created.room_id).is_none());
-        assert_eq!(room.join(None).await.err(), Some(UNAVAILABLE));
+        assert_eq!(room.join(None, None).await.err(), Some(UNAVAILABLE));
 
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
-        let member = room.join(None).await.unwrap();
+        let member = room.join(None, None).await.unwrap();
         tokio::time::advance(ttl * 2).await;
         assert!(!room.sender.is_closed());
 
@@ -1803,7 +2211,7 @@ mod tests {
         settle().await;
         assert!(!room.sender.is_closed());
 
-        let member = room.join(None).await.unwrap();
+        let member = room.join(None, None).await.unwrap();
         tokio::time::advance(ttl).await;
         assert!(!room.sender.is_closed());
 
@@ -1865,6 +2273,7 @@ mod tests {
         let (reply, response) = oneshot::channel();
         room.enqueue(Request::Join {
             host_token: None,
+            member_token: None,
             reply,
         })
         .unwrap();
@@ -1875,6 +2284,7 @@ mod tests {
         let (reply, response) = oneshot::channel();
         room.enqueue(Request::Join {
             host_token: None,
+            member_token: None,
             reply,
         })
         .unwrap();
@@ -2081,8 +2491,8 @@ mod tests {
     async fn host_grants_and_revokes_all_playback_authority_without_reanchoring() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
-        let guest = room.join(None).await.unwrap();
-        let other = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
+        let other = room.join(None, None).await.unwrap();
         let initial = host.snapshots.borrow().clone();
         let grant = SocialAction::SetModerator {
             member_id: guest.id,
@@ -2287,7 +2697,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let before = guest.snapshots.borrow().clone();
         let author = before.participants[1].clone();
 
@@ -2360,7 +2770,7 @@ mod tests {
 
         drop(host);
         settle().await;
-        let returning = room.join(None).await.unwrap();
+        let returning = room.join(None, None).await.unwrap();
         assert_eq!(returning.snapshots.borrow().room_name, before.room_name);
         assert!(
             returning
@@ -2387,7 +2797,7 @@ mod tests {
     async fn social_validation_idempotency_and_member_rate_limits_are_independent_of_playback() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         let message = SocialAction::Message {
             text: "hello".into(),
         };
@@ -2503,7 +2913,7 @@ mod tests {
     async fn social_and_playback_share_tokens_but_not_authors_or_retry_windows() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, host) = host_room(&rooms).await;
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         room.social(
             host.id,
             "grant".into(),
@@ -2579,7 +2989,7 @@ mod tests {
     async fn retained_history_survives_coalescing_and_social_dedupe_has_its_own_bound() {
         let rooms = test_rooms(EMPTY_TTL);
         let (room, mut host) = host_room(&rooms).await;
-        let guest = room.join(None).await.unwrap();
+        let guest = room.join(None, None).await.unwrap();
         room.command(host.id, "load".into(), 0, video())
             .await
             .unwrap();
@@ -2643,12 +3053,12 @@ mod tests {
         let rooms = test_rooms(EMPTY_TTL);
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
-        let host = room.join(Some(created.host_token)).await.unwrap();
+        let host = room.join(Some(created.host_token), None).await.unwrap();
         let mut names = HashSet::new();
         names.insert(host.snapshots.borrow().participants[0].name.clone());
 
         for _ in 0..300 {
-            let guest = room.join(None).await.unwrap();
+            let guest = room.join(None, None).await.unwrap();
             let joined = guest.snapshots.borrow().clone();
             let participant = joined.participants.last().unwrap();
 

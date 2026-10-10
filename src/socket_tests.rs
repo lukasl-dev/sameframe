@@ -166,6 +166,158 @@ async fn public_websockets_need_no_site_key_but_guests_still_cannot_control_play
 }
 
 #[tokio::test]
+async fn member_identity_reconnects_privately_with_new_socket_id_and_without_moderator_authority() {
+    let server = TestServer::start().await;
+    let created = server.rooms.create().unwrap();
+    let mut host = server.connect(&created.room_id).await;
+    let host_welcome = join(&mut host, Some(&created.host_token)).await;
+    let host_identity = host_welcome["member_token"].as_str().unwrap();
+
+    let mut guest = server.connect(&created.room_id).await;
+    let welcome = join(&mut guest, None).await;
+    let token = welcome["member_token"].as_str().unwrap();
+    let original_id = welcome["member_id"].as_u64().unwrap();
+    let author = welcome["snapshot"]["participants"][1].clone();
+
+    assert_eq!(token.len(), 96);
+    assert_ne!(token, host_identity);
+    assert!(!welcome.to_string().contains(host_identity));
+    assert!(!welcome["snapshot"].to_string().contains(token));
+    let public = sync_snapshot(&mut host).await;
+    assert!(!public.to_string().contains(token));
+    assert!(!public.to_string().contains(host_identity));
+
+    social(
+        &mut guest,
+        "chat",
+        json!({ "type": "message", "text": "hello again" }),
+    )
+    .await;
+    let old_event = social_result(&mut guest, "chat").await["event_id"].clone();
+    social(
+        &mut host,
+        "grant",
+        json!({ "type": "set_moderator", "member_id": original_id, "enabled": true }),
+    )
+    .await;
+    assert_eq!(
+        social_result(&mut host, "grant").await["type"],
+        "social_ack"
+    );
+    assert_eq!(
+        sync_snapshot(&mut guest).await["participants"][1]["role"],
+        "moderator"
+    );
+
+    guest.close(None).await.unwrap();
+    let departed = receive(&mut host, |message| {
+        message["type"] == "snapshot" && message["snapshot"]["members"] == 1
+    })
+    .await;
+    assert!(!departed.to_string().contains(token));
+    assert!(!departed.to_string().contains(host_identity));
+
+    let mut returning = server.connect(&created.room_id).await;
+    send(
+        &mut returning,
+        json!({ "type": "join", "member_token": token }),
+    )
+    .await;
+    let resumed = receive(&mut returning, |message| message["type"] == "welcome").await;
+    let new_id = resumed["member_id"].as_u64().unwrap();
+    let returned_author = &resumed["snapshot"]["participants"][1];
+
+    assert_ne!(new_id, original_id);
+    assert_eq!(resumed["member_token"], token);
+    assert_eq!(resumed["role"], "guest");
+    assert_eq!(returned_author["id"], new_id);
+    assert_eq!(returned_author["role"], "guest");
+    assert_eq!(returned_author["name"], author["name"]);
+    assert_eq!(returned_author["avatar"], author["avatar"]);
+    assert!(!resumed["snapshot"].to_string().contains(token));
+    assert!(!resumed.to_string().contains(host_identity));
+
+    command(
+        &mut returning,
+        "forbidden",
+        0,
+        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+    )
+    .await;
+    let error = receive(&mut returning, |message| {
+        message["type"] == "error" && message["id"] == "forbidden"
+    })
+    .await;
+    assert_eq!(error["code"], "forbidden");
+    assert!(!error.to_string().contains(token));
+
+    social(
+        &mut returning,
+        "chat",
+        json!({ "type": "message", "text": "hello again" }),
+    )
+    .await;
+    let new_event = social_result(&mut returning, "chat").await["event_id"].clone();
+    assert_ne!(new_event, old_event);
+    let shared = sync_snapshot(&mut host).await;
+    let entry = shared["events"].as_array().unwrap().last().unwrap();
+
+    assert_eq!(entry["member_id"], new_id);
+    assert_eq!(entry["name"], author["name"]);
+    assert_eq!(entry["avatar"], author["avatar"]);
+    assert!(!shared.to_string().contains(token));
+    assert!(!shared.to_string().contains(host_identity));
+    assert!(shared.get("member_token").is_none());
+
+    host.close(None).await.unwrap();
+    returning.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_member_tokens_fail_real_socket_joins_even_with_valid_host_credentials() {
+    let server = TestServer::start().await;
+    let created = server.rooms.create().unwrap();
+    let mut original = server.connect(&created.room_id).await;
+    let welcome = join(&mut original, None).await;
+    let token = welcome["member_token"].as_str().unwrap();
+    let other = server.rooms.create().unwrap();
+    let forged = format!(
+        "{}{}",
+        if token.starts_with('0') { "1" } else { "0" },
+        &token[1..]
+    );
+
+    for (room_id, host_token, identity) in [
+        (&created.room_id, Some(&created.host_token), "malformed"),
+        (&created.room_id, Some(&created.host_token), forged.as_str()),
+        (&other.room_id, Some(&other.host_token), token),
+    ] {
+        let mut invalid = server.connect(room_id).await;
+        send(
+            &mut invalid,
+            json!({ "type": "join", "host_token": host_token, "member_token": identity }),
+        )
+        .await;
+        let error = receive(&mut invalid, |message| message["type"] == "error").await;
+
+        assert_eq!(error["code"], "invalid_token");
+        assert!(error.get("member_token").is_none());
+        assert!(!error.to_string().contains(identity));
+        let close = timeout(Duration::from_secs(5), invalid.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(close, Message::Close(Some(frame)) if u16::from(frame.code) == 1008));
+    }
+
+    let shared = sync_snapshot(&mut original).await;
+    assert_eq!(shared["members"], 1);
+    assert_eq!(shared["participants"][0]["id"], welcome["member_id"]);
+    original.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn host_guest_and_reconnect_converge_over_real_websockets() {
     let server = TestServer::start().await;
     let created = server.rooms.create().unwrap();
@@ -594,7 +746,7 @@ async fn full_escaped_and_nonascii_history_reaches_welcome_live_updates_and_sync
     assert_eq!(text.chars().count(), 500);
 
     for author_index in 0..5 {
-        let author = room.join(None).await.unwrap();
+        let author = room.join(None, None).await.unwrap();
         for message_index in 0..20 {
             room.social(
                 author.id,

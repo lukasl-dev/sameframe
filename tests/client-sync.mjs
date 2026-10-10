@@ -272,6 +272,23 @@ test('observer keeps contrary native input during the short operation drain wind
   assert.equal(observer.observe(0.2, 1, 400).playing, true, 'quick user play is not lost');
 });
 
+test('authoritative recovery pause drains pre-existing Play until the corrective operation settles', () => {
+  const observer = new NativePlaybackObserver();
+  observer.suppress(false, 60, 0, 1, false);
+
+  assert.equal(observer.observe(0, 1, 0), null);
+  assert.equal(observer.observe(0.3, 1, 300), null);
+  assert.equal(observer.observe(0.6, 1, 600), null);
+  assert.equal(observer.settling, true);
+
+  assert.equal(observer.observe(60, 3, 900, true), null);
+  assert.equal(observer.observe(60, 2, 1000, true), null);
+  assert.equal(observer.observe(60, 2, 1300), null);
+  assert.equal(observer.settling, false);
+
+  assert.equal(observer.observe(60, 1, 1400, true).playing, true);
+});
+
 test('unconfirmed paused cue admits a stable opposite Play without waiting four seconds', () => {
   const observer = new NativePlaybackObserver();
   observer.suppress(false, 0, 0);

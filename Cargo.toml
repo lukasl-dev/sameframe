@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", features = ["sink"] }
+hmac = "0.12"
 http = "1"
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }

@@ -69,7 +69,7 @@ or share links.
 First message, within 10 seconds:
 
 ```json
-{"type":"join","host_token":null}
+{"type":"join","host_token":null,"member_token":null}
 ```
 
 A matching host token grants host control; omission grants guest access. An
@@ -79,12 +79,21 @@ invalid token is rejected, not silently downgraded. Server sends:
 {"type":"welcome","member_id":1,"role":"guest","snapshot":{"incarnation":"random","room_name":"The Sleepy Observatory","revision":0,"media_revision":0,"video_id":null,"playing":false,"playback_rate":1.0,"position_secs":0.0,"anchor_ms":0,"members":1,"participants":[{"id":1,"name":"Sleepy Waffle","role":"guest","avatar":"0123456789abcdef"}],"events":[{"id":1,"at_ms":0,"member_id":1,"name":"Sleepy Waffle","avatar":"0123456789abcdef","kind":"joined","text":null,"video_id":null,"position_secs":null}]},"server_ms":0}
 ```
 
-`member_id` identifies this connection in the public participant list. Each
-participant has a server-assigned two-word funny name, unique within the room,
-and a public random avatar seed, both fixed for that connection's lifetime.
+The welcome also carries `member_token`, a private server-signed room identity.
+Browsers retain it in localStorage under `sameframe:member:<room_id>` and send it
+on later joins to recover the same name and avatar. Missing tokens create new
+identities. Invalid or cross-room tokens are rejected; the browser can discard a
+rejected identity and retry once. Tokens never appear in snapshots, feed entries,
+or invite links. They convey no playback or moderation permissions.
+
+`member_id` identifies this connection in the public participant list. Each new
+identity gets a server-assigned two-word funny name and public random avatar seed.
+Reconnections get a fresh membership ID, with fresh retry history and rate budget,
+but retain the identity. Multiple tabs sharing an identity remain separate members.
+Keeper access still requires the host token; Co-keeper grants remain per connection.
 `room_name` is a random cosy title assigned once, stable for the room's lifetime.
-Avatars are generated locally, with no third-party requests. A reconnect creates
-a new anonymous membership; no persistent identity is implied.
+Avatars are generated locally, with no third-party requests. Identities last only
+as long as their room and do not identify members across different rooms.
 Presence updates include the full participant list without changing playback
 revision or anchor. Host tokens never appear in participant data.
 
@@ -210,6 +219,12 @@ correction events do not generate commands. Native host play, pause, and seek
 actions send room commands. YouTube has no dedicated seek-intent event, so the
 browser observes local position discontinuities with a programmatic-operation
 guard; buffering lag must never be interpreted as a native seek or pause.
+
+On returning to a visible tab, clients request a fresh snapshot before reconciling
+retained playback. Reconnect welcomes and visibility recovery drain corrective
+iframe writes before treating cached state/rate as native controls. Offline cached
+rate changes cannot overwrite the room rate. Confirmed lost iframe media is loaded
+atomically; temporarily unavailable metadata alone does not trigger a reload.
 
 Guest native controls affect only their device. Personal pause/seek can suspend
 following without changing the room. A visible Rejoin playback action returns

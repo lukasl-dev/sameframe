@@ -560,7 +560,10 @@ mod tests {
         let rooms = Rooms::new();
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
-        let member = room.join(Some(created.host_token.clone())).await.unwrap();
+        let member = room
+            .join(Some(created.host_token.clone()), None)
+            .await
+            .unwrap();
         let snapshot = member.snapshots.borrow().clone();
         let router = router_with_rooms(rooms);
 

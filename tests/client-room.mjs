@@ -47,6 +47,8 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
         replaceChildren(...children) { this.children = children; this.replacements = (this.replacements ?? 0) + 1; },
         append(...children) { this.children.push(...children); },
         scrollTop: 0, scrollHeight: 300, clientHeight: 300,
+        setAttribute(key, value) { this[key] = value; },
+        focus() { document.activeElement = this; },
         toggleAttribute(attr, value) { writes.push([name, attr, value]); this[attr] = value; },
         addEventListener(event, fn) { this.events[event] = fn; } };
       for (const [key, initial] of [['hidden', true], ['textContent', ''], ['title', '']]) {
@@ -266,6 +268,32 @@ const commands = (ws) => ws.sent.filter((message) => message.type === 'command')
 const socialCommands = (ws) => ws.sent.filter((message) => message.type === 'social');
 const event = (id, kind, overrides = {}) => ({ id, kind, at_ms: 1000, member_id: 1,
   name: 'Sleepy Waffle', avatar: '0123456789abcdef', text: null, video_id: null, position_secs: null, ...overrides });
+
+test('theater mode toggles without changing playback and Escape restores focus', async () => {
+  const b = await browser();
+  const ws = await b.welcome(initial({ video_id: id }));
+  const player = b.ready();
+  const writes = [player.videos.length, player.plays, player.pauses, player.seeks.length];
+
+  assert.equal(b.get('theater-toggle').hidden, false);
+  b.click('theater-toggle');
+  assert.equal(b.document.body.dataset.theater, 'true');
+  assert.equal(b.get('theater-toggle')['aria-pressed'], 'true');
+  assert.equal(b.get('theater-label').textContent, 'Exit theater');
+  b.documentEvents.get('keydown')({ key: 'Enter' });
+  assert.equal(b.document.body.dataset.theater, 'true');
+  b.documentEvents.get('keydown')({ key: 'Escape' });
+  assert.equal(b.document.body.dataset.theater, 'false');
+  assert.equal(b.get('theater-toggle')['aria-pressed'], 'false');
+  assert.equal(b.get('theater-label').textContent, 'Theater mode');
+  assert.equal(b.document.activeElement, b.get('theater-toggle'));
+
+  b.click('theater-toggle');
+  b.click('theater-toggle');
+  assert.equal(b.document.body.dataset.theater, 'false');
+  assert.deepEqual([player.videos.length, player.plays, player.pauses, player.seeks.length], writes);
+  assert.equal(commands(ws).length, 0);
+});
 
 test('server-issued room identity survives reconnect and reload without granting Keeper access', async () => {
   const memberStorage = new Map();

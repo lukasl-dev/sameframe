@@ -6,6 +6,21 @@ const text = (id, value) => {
   if (['room-error', 'room-notice', 'chat-error'].includes(id)) node.hidden = !value;
 };
 
+function setTheaterMode(active) {
+  document.body.dataset.theater = String(active);
+  element('theater-toggle')?.setAttribute('aria-pressed', String(active));
+  text('theater-label', active ? 'Exit theater' : 'Theater mode');
+  if (!active) element('theater-toggle')?.focus();
+}
+
+element('theater-toggle')?.addEventListener('click', () => {
+  setTheaterMode(document.body.dataset.theater !== 'true');
+});
+if (element('theater-toggle')) element('theater-toggle').hidden = false;
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && document.body.dataset.theater === 'true') setTheaterMode(false);
+});
+
 const roomId = document.body.dataset.roomId;
 const roomPath = `/room/${encodeURIComponent(roomId ?? '')}`;
 const shareUrl = `${location.origin}${roomPath}`;

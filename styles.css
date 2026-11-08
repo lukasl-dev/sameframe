@@ -158,3 +158,44 @@
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   }
 }
+
+body[data-theater="true"] {
+  overflow: hidden;
+}
+
+body[data-theater="true"] #main {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  background: var(--crust);
+}
+
+body[data-theater="true"] :is(#room-header, #host-controls, #room-members, #room-chat) {
+  display: none;
+}
+
+body[data-theater="true"] #room-layout {
+  display: block;
+}
+
+body[data-theater="true"] #player-shell {
+  display: flex;
+  height: 100dvh;
+  flex-direction: column;
+}
+
+body[data-theater="true"] #player-frame {
+  flex: 1;
+  min-height: 0;
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 0;
+}
+
+body[data-theater="true"] #player-caption {
+  flex: none;
+  padding: 6px max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+}

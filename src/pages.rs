@@ -551,9 +551,10 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                 if available {
                     <main
                         id="main"
-                        class="mx-auto w-[calc(100%-24px)] max-w-[1480px] pb-5 sm:w-[calc(100%-40px)] min-[761px]:max-w-[calc(min(1140px,max(300px,(100svh-400px)*16/9))+344px)]"
+                        class="mx-auto w-[calc(100%-24px)] max-w-[1480px] pb-5 sm:w-[calc(100%-40px)]"
                     >
                         <div
+                            id="room-header"
                             class="mb-3 flex min-h-[58px] items-center justify-between gap-3 border-b border-border sm:mb-[18px] sm:min-h-16"
                         >
                             <h1 class="sr-only">"Watch together"</h1>
@@ -639,7 +640,8 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                             </div>
                         </div>
                         <div
-                            class="grid items-start gap-[22px] min-[761px]:grid-cols-[minmax(0,1fr)_290px] min-[1001px]:grid-cols-[minmax(0,1fr)_320px] min-[1001px]:gap-6"
+                            id="room-layout"
+                            class="grid items-start gap-[22px] min-[1001px]:grid-cols-[minmax(0,1fr)_290px] min-[1201px]:grid-cols-[minmax(0,1fr)_320px] min-[1001px]:gap-6"
                         >
                             <div class="min-w-0">
                                 <section
@@ -679,6 +681,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                 <section class="min-w-0" aria-label="Shared video player">
                                     <div id="player-shell" class="min-w-0">
                                         <div
+                                            id="player-frame"
                                             class="relative isolate aspect-video overflow-hidden rounded-xl border border-border bg-[#11111b] [&_iframe]:absolute [&_iframe]:inset-0 [&_iframe]:size-full [&_iframe]:border-0"
                                         >
                                             <p
@@ -725,7 +728,8 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             <div id="player-mount" class="absolute inset-0 size-full"></div>
                                         </div>
                                         <div
-                                            class="relative flex h-12 items-center gap-3 text-[11px] text-muted-foreground"
+                                            id="player-caption"
+                                            class="relative flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 py-1 text-[11px] text-muted-foreground"
                                         >
                                             <span id="playback-status" class="min-w-0 flex-1 truncate">
                                                 "YouTube · waiting for a video"
@@ -753,6 +757,32 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             >
                                                 "Reconnect to room"
                                             </button>
+                                            <button
+                                                id="theater-toggle"
+                                                class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-3 text-xs text-foreground/80 hover:bg-foreground/5"
+                                                type="button"
+                                                aria-pressed="false"
+                                                aria-controls="main"
+                                                hidden=(true)
+                                            >
+                                                <svg
+                                                    class="size-[18px]"
+                                                    viewBox="0 0 20 20"
+                                                    fill="none"
+                                                    aria-hidden="true"
+                                                >
+                                                    <rect
+                                                        x="2"
+                                                        y="4"
+                                                        width="16"
+                                                        height="12"
+                                                        rx="2"
+                                                        stroke="currentColor"
+                                                        stroke-width="1.5"
+                                                    ></rect>
+                                                </svg>
+                                                <span id="theater-label">"Theater mode"</span>
+                                            </button>
                                         </div>
                                     </div>
                                     <p id="guest-note" class="sr-only" hidden=(true)>
@@ -765,6 +795,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                     </noscript>
                                 </section>
                                 <section
+                                    id="room-members"
                                     class="mt-4 border-t border-border pt-3.5"
                                     aria-labelledby="company-title"
                                 >
@@ -798,7 +829,8 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                 </section>
                             </div>
                             <aside
-                                class="relative flex h-[clamp(360px,60svh,540px)] min-w-0 flex-col overflow-hidden rounded-[14px] border border-border bg-card min-[761px]:h-[clamp(380px,calc(100svh-112px),760px)]"
+                                id="room-chat"
+                                class="relative flex h-[clamp(360px,60svh,540px)] min-w-0 flex-col overflow-hidden rounded-[14px] border border-border bg-card min-[1001px]:h-[clamp(380px,calc(100svh-112px),760px)]"
                                 aria-labelledby="chat-title"
                             >
                                 <div

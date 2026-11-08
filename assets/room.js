@@ -5,11 +5,19 @@ const text = (id, value) => {
   node.textContent = value;
   if (['room-error', 'room-notice', 'chat-error'].includes(id)) node.hidden = !value;
 };
+const theaterMenus = ['room-members', 'video-menu'];
 
 function setTheaterMode(active) {
   document.body.dataset.theater = String(active);
   element('theater-toggle')?.setAttribute('aria-pressed', String(active));
   text('theater-label', active ? 'Exit theater' : 'Theater mode');
+  if (element('room-members')) element('room-members').open = !active;
+  if (element('video-menu')) element('video-menu').open = false;
+  const controls = element('host-controls');
+  if (controls) {
+    if (active) element('video-menu')?.append(controls);
+    else element('shared-player')?.before(controls);
+  }
   if (!active) element('theater-toggle')?.focus();
 }
 
@@ -18,7 +26,22 @@ element('theater-toggle')?.addEventListener('click', () => {
 });
 if (element('theater-toggle')) element('theater-toggle').hidden = false;
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && document.body.dataset.theater === 'true') setTheaterMode(false);
+  if (event.key !== 'Escape' || document.body.dataset.theater !== 'true') return;
+  const menu = theaterMenus.map(element).find(menu => menu?.open);
+  if (menu) {
+    menu.open = false;
+    menu.querySelector('summary')?.focus();
+  } else setTheaterMode(false);
+});
+document.addEventListener('pointerdown', (event) => {
+  if (document.body.dataset.theater !== 'true') return;
+  for (const menu of theaterMenus.map(element)) {
+    if (menu?.open && !menu.contains(event.target)) menu.open = false;
+  }
+});
+window.addEventListener('blur', () => {
+  if (document.body.dataset.theater !== 'true') return;
+  for (const menu of theaterMenus.map(element)) if (menu) menu.open = false;
 });
 
 const roomId = document.body.dataset.roomId;
@@ -992,8 +1015,12 @@ if (helpers) {
       render();
       return;
     }
-    if (canControl()) command({ type: 'set_video', video_id: videoId });
-    else social({ type: 'propose_video', video_id: videoId }, 'video-url');
+    const submitted = canControl() ? command({ type: 'set_video', video_id: videoId })
+      : social({ type: 'propose_video', video_id: videoId }, 'video-url');
+    if (submitted && element('video-menu')?.open) {
+      element('video-menu').open = false;
+      element('video-summary')?.focus();
+    }
   });
   element('chat-form')?.addEventListener('submit', (event) => {
     event.preventDefault();

@@ -678,7 +678,11 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                         "Pick a video, or suggest one to the room."
                                     </p>
                                 </section>
-                                <section class="min-w-0" aria-label="Shared video player">
+                                <section
+                                    id="shared-player"
+                                    class="min-w-0"
+                                    aria-label="Shared video player"
+                                >
                                     <div id="player-shell" class="min-w-0">
                                         <div
                                             id="player-frame"
@@ -757,6 +761,55 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             >
                                                 "Reconnect to room"
                                             </button>
+                                            <details
+                                                id="room-members"
+                                                class="order-last mt-4 w-full border-t border-border pt-3.5"
+                                                name="theater-menu"
+                                                open=(true)
+                                            >
+                                                <summary
+                                                    id="members-summary"
+                                                    class="min-h-11 cursor-pointer content-center rounded-lg px-3 text-xs font-medium text-foreground/80 hover:bg-foreground/5"
+                                                >
+                                                    "People"
+                                                    <span
+                                                        id="member-count"
+                                                        class="ml-1 text-[11px] text-muted-foreground"
+                                                    >
+                                                        "—"
+                                                    </span>
+                                                </summary>
+                                                <div id="members-panel">
+                                                    <p
+                                                        id="role-label"
+                                                        class="mb-3 text-[11px] text-muted-foreground"
+                                                    >
+                                                        "Connecting…"
+                                                    </p>
+                                                    <ul
+                                                        id="members"
+                                                        class="m-0 flex max-h-[112px] list-none flex-wrap gap-2 overflow-y-auto p-0 [scrollbar-width:thin]"
+                                                        aria-label="Room members"
+                                                    ></ul>
+                                                    <p
+                                                        class="mt-3 text-[10px] leading-relaxed text-muted-foreground"
+                                                    >
+                                                        "Keeper picks the programme · Co-keepers lend a hand · Companions bring the company"
+                                                    </p>
+                                                </div>
+                                            </details>
+                                            <details
+                                                id="video-menu"
+                                                class="hidden"
+                                                name="theater-menu"
+                                            >
+                                                <summary
+                                                    id="video-summary"
+                                                    class="min-h-11 cursor-pointer content-center rounded-lg px-3 text-xs font-medium text-foreground/80 hover:bg-foreground/5"
+                                                >
+                                                    "Change video"
+                                                </summary>
+                                            </details>
                                             <button
                                                 id="theater-toggle"
                                                 class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-3 text-xs text-foreground/80 hover:bg-foreground/5"
@@ -793,39 +846,6 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             "Enable JavaScript to connect to this room and watch in sync."
                                         </p>
                                     </noscript>
-                                </section>
-                                <section
-                                    id="room-members"
-                                    class="mt-4 border-t border-border pt-3.5"
-                                    aria-labelledby="company-title"
-                                >
-                                    <div class="mb-3 flex items-center justify-between gap-3">
-                                        <h2 id="company-title" class="text-[13px] font-medium">
-                                            "In good company"
-                                            <span
-                                                id="member-count"
-                                                class="ml-1 text-[11px] text-muted-foreground"
-                                            >
-                                                "—"
-                                            </span>
-                                        </h2>
-                                        <span
-                                            id="role-label"
-                                            class="text-[11px] text-muted-foreground"
-                                        >
-                                            "Connecting…"
-                                        </span>
-                                    </div>
-                                    <ul
-                                        id="members"
-                                        class="m-0 flex max-h-[112px] list-none flex-wrap gap-2 overflow-y-auto p-0 [scrollbar-width:thin]"
-                                        aria-label="Room members"
-                                    ></ul>
-                                    <p
-                                        class="mt-3 text-[10px] leading-relaxed text-muted-foreground"
-                                    >
-                                        "Keeper picks the programme · Co-keepers lend a hand · Companions bring the company"
-                                    </p>
                                 </section>
                             </div>
                             <aside

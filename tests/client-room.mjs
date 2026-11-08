@@ -46,6 +46,9 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
         disabled: false, value: '', events: {}, dataset: {}, children: [],
         replaceChildren(...children) { this.children = children; this.replacements = (this.replacements ?? 0) + 1; },
         append(...children) { this.children.push(...children); },
+        before(node) { this.previousSibling = node; },
+        querySelector(tag) { return this.children.find(child => child.tagName?.toLowerCase() === tag) ?? null; },
+        contains(node) { return node === this || this.children.some(child => child === node || child.contains?.(node)); },
         scrollTop: 0, scrollHeight: 300, clientHeight: 300,
         setAttribute(key, value) { this[key] = value; },
         focus() { document.activeElement = this; },
@@ -71,6 +74,11 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
       classList: { add() {} }, setAttribute(key, value) { this.attributes[key] = value; },
       append(...children) { this.children.push(...children); } }; },
     head: { scripts: [], append(script) { this.scripts.push(script); } } };
+
+  for (const [menu, summary] of [['room-members', 'members-summary'], ['video-menu', 'video-summary']]) {
+    get(summary).tagName = 'SUMMARY';
+    get(menu).append(get(summary));
+  }
 
   class WebSocket {
     static OPEN = 1;
@@ -280,12 +288,21 @@ test('theater mode toggles without changing playback and Escape restores focus',
   assert.equal(b.document.body.dataset.theater, 'true');
   assert.equal(b.get('theater-toggle')['aria-pressed'], 'true');
   assert.equal(b.get('theater-label').textContent, 'Exit theater');
+  assert.equal(b.get('room-members').open, false);
+  const members = b.get('members').children;
+  b.get('room-members').open = true;
+  b.documentEvents.get('keydown')({ key: 'Escape' });
+  assert.equal(b.get('room-members').open, false);
+  assert.equal(b.document.body.dataset.theater, 'true');
+  assert.equal(b.document.activeElement, b.get('members-summary'));
+  assert.equal(b.get('members').children, members);
   b.documentEvents.get('keydown')({ key: 'Enter' });
   assert.equal(b.document.body.dataset.theater, 'true');
   b.documentEvents.get('keydown')({ key: 'Escape' });
   assert.equal(b.document.body.dataset.theater, 'false');
   assert.equal(b.get('theater-toggle')['aria-pressed'], 'false');
   assert.equal(b.get('theater-label').textContent, 'Theater mode');
+  assert.equal(b.get('room-members').open, true);
   assert.equal(b.document.activeElement, b.get('theater-toggle'));
 
   b.click('theater-toggle');
@@ -293,6 +310,76 @@ test('theater mode toggles without changing playback and Escape restores focus',
   assert.equal(b.document.body.dataset.theater, 'false');
   assert.deepEqual([player.videos.length, player.plays, player.pauses, player.seeks.length], writes);
   assert.equal(commands(ws).length, 0);
+});
+
+test('theater menus dismiss on outside pointer or window blur, not on menu interaction or in normal mode', async () => {
+  for (const [menuId, summaryId, panelId] of [
+    ['room-members', 'members-summary', 'members-panel'], ['video-menu', 'video-summary', 'host-controls'],
+  ]) {
+    const b = await browser();
+    const menu = b.get(menuId);
+    const action = b.get('menu-action');
+    const panel = b.get(panelId);
+    menu.append(panel);
+    panel.append(action);
+    b.click('theater-toggle');
+    menu.open = true;
+
+    for (const target of [b.get(summaryId), panel, action]) {
+      b.documentEvents.get('pointerdown')({ target });
+      assert.equal(menu.open, true);
+    }
+    b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
+    assert.equal(menu.open, false);
+    assert.equal(b.document.body.dataset.theater, 'true');
+    menu.open = true;
+    b.windowEvents.get('blur')();
+    assert.equal(menu.open, false);
+
+    b.click('theater-toggle');
+    menu.open = true;
+    b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
+    b.windowEvents.get('blur')();
+    assert.equal(menu.open, true);
+  }
+});
+
+test('theater video menu reuses the form, preserves drafts, and keeps role permissions and validation', async () => {
+  for (const role of ['host', 'moderator', 'guest']) {
+    const b = await browser();
+    const ws = await b.welcome(initial(), role);
+    b.get('video-url').value = 'unfinished draft';
+    b.click('theater-toggle');
+    const menu = b.get('video-menu');
+    assert.equal(menu.open, false);
+    assert.ok(menu.contains(b.get('host-controls')));
+    assert.equal(b.get('video-url').value, 'unfinished draft');
+    menu.open = true;
+    b.documentEvents.get('keydown')({ key: 'Escape' });
+    assert.equal(menu.open, false);
+    assert.equal(b.document.body.dataset.theater, 'true');
+    assert.equal(b.document.activeElement, b.get('video-summary'));
+
+    menu.open = true;
+    b.submit('video-form');
+    assert.equal(menu.open, true);
+    assert.match(b.get('room-error').textContent, /valid YouTube/);
+    assert.equal(commands(ws).length + socialCommands(ws).length, 0);
+    b.get('video-url').value = `https://youtu.be/${id}`;
+    b.submit('video-form');
+    assert.equal(menu.open, false);
+    assert.equal(b.document.activeElement, b.get('video-summary'));
+    if (role === 'guest') {
+      assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', video_id: id });
+      assert.equal(commands(ws).length, 0);
+    } else {
+      assert.deepEqual(commands(ws)[0].action, { type: 'set_video', video_id: id });
+      assert.equal(socialCommands(ws).length, 0);
+    }
+    b.click('theater-toggle');
+    assert.equal(b.get('shared-player').previousSibling, b.get('host-controls'));
+    assert.equal(b.get('video-url').value, `https://youtu.be/${id}`);
+  }
 });
 
 test('server-issued room identity survives reconnect and reload without granting Keeper access', async () => {

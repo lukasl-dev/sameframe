@@ -173,7 +173,7 @@ body[data-theater="true"] #main {
   background: var(--crust);
 }
 
-body[data-theater="true"] :is(#room-header, #host-controls, #room-members, #room-chat) {
+body[data-theater="true"] :is(#room-header, #room-chat) {
   display: none;
 }
 
@@ -198,4 +198,36 @@ body[data-theater="true"] #player-frame {
 body[data-theater="true"] #player-caption {
   flex: none;
   padding: 6px max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+}
+
+body[data-theater="true"] #video-menu {
+  display: block;
+}
+
+body[data-theater="true"] :is(#room-members, #video-menu) {
+  order: 0;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+body[data-theater="true"] :is(#members-panel, #host-controls) {
+  position: absolute;
+  z-index: 30;
+  bottom: 100%;
+  right: 12px;
+  width: min(360px, calc(100% - 24px));
+  max-height: 50dvh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+body[data-theater="true"] #members {
+  max-height: none;
 }

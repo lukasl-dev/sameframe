@@ -113,7 +113,7 @@
     padding: 10px 12px;
     color: var(--text);
     background: var(--base);
-    border: 1px solid var(--surface1);
+    border: 2px solid var(--surface1);
     border-radius: 9px;
     font-size: 16px;
     line-height: 1.4;
@@ -121,11 +121,12 @@
   }
   input::placeholder { color: var(--muted); opacity: .85; }
   input:hover { border-color: var(--muted); }
-  input:focus-visible { border-color: var(--lavender); outline-offset: 2px; }
   input[readonly] { color: var(--subtext); font-size: .875rem; }
   label { display: block; color: var(--text); font-size: .875rem; font-weight: 550; margin-bottom: 7px; }
   button:disabled { cursor: not-allowed; opacity: .5; }
 }
+
+input:focus { border-color: color-mix(in srgb, var(--lavender) 70%, transparent); outline: none; }
 
 @layer components {
   .skip-link { position: fixed; z-index: 30; top: 10px; left: 10px; padding: 12px 18px; border-radius: 8px; background: var(--primary); color: var(--primary-foreground); transform: translateY(-150%); }

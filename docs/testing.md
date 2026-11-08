@@ -64,7 +64,7 @@ at mode 0600, then remains identical across a restart.
 The client harness covers same-revision role/feed updates, safe text rendering,
 separate social acknowledgements, preserved drafts, suggestion approval,
 Co-keeper playback, revoked authority, and chat scroll anchoring. Buffering must
-never create a banner; routine notices occupy the fixed-height player caption.
+never create a banner; routine notices stay in the player caption.
 
 ## Reconnect regressions
 
@@ -125,6 +125,24 @@ session storage. Check desktop and a narrow mobile viewport.
 
 Watch the console for application exceptions. The YouTube widget can emit
 its own initialization warnings; distinguish those from application failures.
+
+## Theater checks
+
+- At 1366×768 and 1920×600, normal mode keeps the player and people visible,
+  with chat alongside. At 320px, chat stacks below without horizontal scrolling.
+- Enter and exit theater with a playing video. The iframe must stay mounted;
+  layout changes must not send playback commands or reset position.
+- Check the inline video form on desktop and its popover below 544px. Preserve
+  drafts across mode changes and resize. Shrinking with the input focused must
+  leave that input visible, with a visible keyboard focus indicator.
+- Tab out of either popover, click outside, and switch windows. Dismissed
+  controls must not retain hidden focus. Escape closes the open popover first,
+  then exits theater; restore focus to the corresponding toggle.
+- Submit as a Companion, including a rejected or timed-out suggestion. Feedback
+  must remain visible while chat is hidden; preserve the draft on failure.
+- Check avatar overflow and Co-keeper actions with several members. Restore the
+  normal people disclosure's previous open/closed state on leaving theater.
+- Check 44px touch targets and wrapped recovery notices on a narrow touch device.
 
 ## Limits of native event attribution
 

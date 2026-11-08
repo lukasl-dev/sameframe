@@ -5,26 +5,37 @@ const text = (id, value) => {
   node.textContent = value;
   if (['room-error', 'room-notice', 'chat-error'].includes(id)) node.hidden = !value;
 };
+let membersExpanded = true;
+
 function setTheaterMode(active) {
+  const members = element('room-members');
+  if (active && members) membersExpanded = members.open;
   document.body.dataset.theater = String(active);
-  element('theater-toggle')?.setAttribute('aria-pressed', String(active));
+  const toggle = element('theater-toggle');
+  toggle?.setAttribute('aria-pressed', String(active));
   text('theater-label', active ? 'Exit theater' : 'Theater mode');
-  element('theater-toggle')?.setAttribute('aria-label', active ? 'Exit theater' : 'Theater mode');
-  if (element('theater-toggle')) element('theater-toggle').title = active ? 'Exit theater' : 'Theater mode';
   setVideoExpanded(false);
-  if (element('room-members')) element('room-members').open = !active;
+  if (members) members.open = active ? false : membersExpanded;
   const controls = element('host-controls');
   if (controls) {
     if (active) element('theater-video')?.append(controls);
     else element('shared-player')?.before(controls);
   }
-  if (!active) element('theater-toggle')?.focus();
+  const error = element('chat-error');
+  if (error) {
+    if (active) element('player-caption')?.append(error);
+    else element('chat-form')?.before(error);
+  }
+  if (!active) toggle?.focus();
 }
 
 function setVideoExpanded(active) {
-  if (element('theater-video')) element('theater-video').dataset.open = String(active);
-  element('video-toggle')?.setAttribute('aria-expanded', String(active));
+  const video = element('theater-video');
+  if (video) video.dataset.open = String(active);
+  const toggle = element('video-toggle');
+  toggle?.setAttribute('aria-expanded', String(active));
   if (active && element('room-members')) element('room-members').open = false;
+  if (!active && element('host-controls')?.contains(document.activeElement) && toggle?.getClientRects().length) toggle.focus();
 }
 
 element('video-toggle')?.addEventListener('click', () => {
@@ -33,14 +44,18 @@ element('video-toggle')?.addEventListener('click', () => {
   if (active) element('video-url')?.focus();
 });
 element('room-members')?.addEventListener('toggle', () => {
-  if (element('room-members')?.open) setVideoExpanded(false);
+  if (document.body.dataset.theater !== 'true') return;
+  const menu = element('room-members');
+  if (menu?.open) setVideoExpanded(false);
+  else if (menu?.contains(document.activeElement)) element('members-summary')?.focus();
 });
 element('theater-toggle')?.addEventListener('click', () => {
   setTheaterMode(document.body.dataset.theater !== 'true');
 });
 if (element('theater-toggle')) element('theater-toggle').hidden = false;
 document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape' || document.body.dataset.theater !== 'true') return;
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || document.body.dataset.theater !== 'true') return;
+  event.preventDefault();
   const menu = element('room-members');
   if (menu?.open) {
     menu.open = false;
@@ -50,17 +65,21 @@ document.addEventListener('keydown', (event) => {
     element('video-toggle')?.focus();
   } else setTheaterMode(false);
 });
-document.addEventListener('pointerdown', (event) => {
+function dismissTheaterPanelsOutside(target) {
   if (document.body.dataset.theater !== 'true') return;
   const menu = element('room-members');
-  if (menu?.open && !menu.contains(event.target)) menu.open = false;
+  if (menu?.open && !menu.contains(target)) menu.open = false;
   const video = element('theater-video');
-  if (video?.dataset.open === 'true' && !video.contains(event.target)) setVideoExpanded(false);
-});
-window.addEventListener('blur', () => {
+  if (video?.dataset.open === 'true' && !video.contains(target)) setVideoExpanded(false);
+}
+
+document.addEventListener('pointerdown', (event) => dismissTheaterPanelsOutside(event.target));
+document.addEventListener('focusin', (event) => dismissTheaterPanelsOutside(event.target));
+window.addEventListener('blur', () => dismissTheaterPanelsOutside(null));
+window.addEventListener('resize', () => {
   if (document.body.dataset.theater !== 'true') return;
-  if (element('room-members')) element('room-members').open = false;
-  setVideoExpanded(false);
+  if (!element('video-toggle')?.getClientRects().length) setVideoExpanded(false);
+  else if (element('host-controls')?.contains(document.activeElement)) setVideoExpanded(true);
 });
 
 const roomId = document.body.dataset.roomId;

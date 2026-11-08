@@ -543,7 +543,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                 topcoat::dev::script()
             </head>
             <body
-                class="room-page bg-background"
+                class="room-page bg-background theater:overflow-hidden"
                 data-room-id=(if available { Some(room_id) } else { None })
                 data-sync-url=(asset!("assets/sync.js"))
             >
@@ -551,13 +551,13 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                 if available {
                     <main
                         id="main"
-                        class="mx-auto w-[calc(100%-24px)] max-w-[1480px] pb-5 sm:w-[calc(100%-40px)]"
+                        class="mx-auto w-[calc(100%-24px)] max-w-[1480px] pb-5 sm:w-[calc(100%-40px)] min-[761px]:max-w-[calc(min(1140px,max(300px,(100svh-400px)*16/9))+344px)] theater:fixed theater:inset-0 theater:z-20 theater:w-full theater:max-w-none theater:p-0 theater:bg-[#11111b]"
                     >
+                        <h1 class="sr-only">"Watch together"</h1>
                         <div
                             id="room-header"
-                            class="mb-3 flex min-h-[58px] items-center justify-between gap-3 border-b border-border sm:mb-[18px] sm:min-h-16"
+                            class="mb-3 flex min-h-[58px] items-center justify-between gap-3 border-b border-border sm:mb-[18px] sm:min-h-16 theater:hidden"
                         >
-                            <h1 class="sr-only">"Watch together"</h1>
                             <div class="flex min-w-0 items-center gap-3">
                                 <a
                                     class="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"
@@ -641,21 +641,24 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                         </div>
                         <div
                             id="room-layout"
-                            class="grid items-start gap-[22px] min-[1001px]:grid-cols-[minmax(0,1fr)_290px] min-[1201px]:grid-cols-[minmax(0,1fr)_320px] min-[1001px]:gap-6"
+                            class="grid items-start gap-[22px] min-[761px]:grid-cols-[minmax(0,1fr)_290px] min-[1001px]:grid-cols-[minmax(0,1fr)_320px] min-[1001px]:gap-6 theater:block"
                         >
                             <div class="min-w-0">
                                 <section
                                     id="host-controls"
-                                    class="mb-3.5"
+                                    class="mb-3.5 theater:m-0"
                                     aria-label="Choose or suggest a video"
                                 >
-                                    <form id="video-form" class="flex items-stretch gap-2">
+                                    <form
+                                        id="video-form"
+                                        class="flex items-stretch gap-2 theater:items-center"
+                                    >
                                         <label for="video-url" class="sr-only">
                                             "YouTube link"
                                         </label>
                                         <input
                                             id="video-url"
-                                            class="min-w-0 flex-1 border-border bg-card px-3 py-2 sm:text-sm"
+                                            class="min-w-0 flex-1 border-border bg-card px-3 py-2 sm:text-sm theater:h-9 theater:min-h-9 theater:py-1 theater:text-base theater:leading-tight"
                                             name="video"
                                             type="text"
                                             required=(true)
@@ -663,7 +666,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             autocomplete="off"
                                             autocapitalize="none"
                                             spellcheck="false"
-                                            aria-describedby="playback-help"
+                                            aria-describedby="playback-help room-error chat-error"
                                         >
                                         button(
                                             attrs: attributes! {
@@ -683,10 +686,13 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                     class="min-w-0"
                                     aria-label="Shared video player"
                                 >
-                                    <div id="player-shell" class="min-w-0">
+                                    <div
+                                        id="player-shell"
+                                        class="min-w-0 theater:flex theater:h-dvh theater:flex-col theater:[container:theater-footer_/_inline-size]"
+                                    >
                                         <div
                                             id="player-frame"
-                                            class="relative isolate aspect-video overflow-hidden rounded-xl border border-border bg-[#11111b] [&_iframe]:absolute [&_iframe]:inset-0 [&_iframe]:size-full [&_iframe]:border-0"
+                                            class="relative isolate aspect-video overflow-hidden rounded-xl border border-border bg-[#11111b] [&_iframe]:absolute [&_iframe]:inset-0 [&_iframe]:size-full [&_iframe]:border-0 theater:min-h-0 theater:flex-1 theater:aspect-auto theater:rounded-none theater:border-0"
                                         >
                                             <p
                                                 id="room-error"
@@ -726,7 +732,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                                 <p
                                                     class="mt-2 max-w-[370px] text-[11px] text-muted-foreground sm:text-xs"
                                                 >
-                                                    "Pick a video above, or leave a suggestion for your people."
+                                                    "Choose a video, or suggest one to the room."
                                                 </p>
                                             </div>
                                             <div id="player-mount" class="absolute inset-0 size-full"></div>
@@ -735,13 +741,16 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             id="player-caption"
                                             class="relative flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 py-1 text-[11px] text-muted-foreground"
                                         >
-                                            <span id="playback-status" class="min-w-0 flex-1 truncate">
+                                            <span
+                                                id="playback-status"
+                                                class="min-w-0 flex-1 truncate @max-[923px]/theater-footer:hidden"
+                                            >
                                                 "YouTube · waiting for a video"
                                             </span>
                                             <div id="theater-video" class="hidden">
                                                 <button
                                                     id="video-toggle"
-                                                    class="hidden size-11 items-center justify-center rounded-lg text-foreground/80 hover:bg-foreground/5"
+                                                    class="hidden size-11 items-center justify-center rounded-lg text-foreground/80 hover:bg-foreground/5 @max-[543px]/theater-footer:flex"
                                                     type="button"
                                                     aria-label="Change or suggest a video"
                                                     title="Change or suggest a video"
@@ -765,7 +774,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             </div>
                                             <span
                                                 id="room-notice"
-                                                class="min-w-0 flex-1 truncate text-right"
+                                                class="min-w-0 flex-1 truncate text-right theater:whitespace-normal theater:[overflow-wrap:anywhere]"
                                                 role="status"
                                                 aria-live="polite"
                                                 hidden=(true)
@@ -788,63 +797,65 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             </button>
                                             <details
                                                 id="room-members"
-                                                class="order-last mt-4 w-full border-t border-border pt-3.5"
+                                                class="order-last mt-3 w-full border-t border-border pt-2"
                                                 open=(true)
                                             >
                                                 <summary
                                                     id="members-summary"
-                                                    class="min-h-11 cursor-pointer content-center rounded-lg px-3 text-xs font-medium text-foreground/80 hover:bg-foreground/5"
+                                                    class="min-h-11 cursor-pointer content-center rounded-lg px-3 text-xs font-medium text-foreground/80 hover:bg-foreground/5 theater:flex theater:items-center theater:px-1 theater:marker:content-['']"
                                                 >
-                                                    <span id="room-panel-label">"People"</span>
+                                                    <span id="room-panel-label" class="theater:hidden">
+                                                        "People"
+                                                    </span>
                                                     <span
                                                         id="member-avatars"
-                                                        class="hidden"
+                                                        class="hidden theater:flex theater:items-center"
                                                         aria-hidden="true"
                                                     >
                                                         "…"
                                                     </span>
                                                     <span
                                                         id="member-count"
-                                                        class="ml-1 text-[11px] text-muted-foreground"
+                                                        class="ml-1 text-[11px] text-muted-foreground theater:hidden"
                                                     >
                                                         "—"
                                                     </span>
                                                 </summary>
-                                                <div id="room-panel">
-                                                    <div id="members-panel">
-                                                        <div class="mb-3 flex items-center justify-between gap-3">
-                                                            <h2
-                                                                id="theater-people-title"
-                                                                class="hidden text-sm font-medium"
-                                                            >
-                                                                "People"
-                                                            </h2>
-                                                            <p
-                                                                id="role-label"
-                                                                class="text-[11px] text-muted-foreground"
-                                                            >
-                                                                "Connecting…"
-                                                            </p>
-                                                        </div>
-                                                        <ul
-                                                            id="members"
-                                                            class="m-0 flex max-h-[112px] list-none flex-wrap gap-2 overflow-y-auto p-0 [scrollbar-width:thin]"
-                                                            aria-label="Room members"
-                                                        ></ul>
-                                                        <p
-                                                            id="members-help"
-                                                            class="mt-3 text-[10px] leading-relaxed text-muted-foreground"
+                                                <div
+                                                    id="room-panel"
+                                                    class="theater:absolute theater:z-30 theater:bottom-full theater:right-3 theater:w-[min(360px,calc(100%-24px))] theater:max-h-[min(420px,50dvh)] theater:overflow-y-auto theater:rounded-t-xl theater:border theater:border-border theater:bg-card theater:p-4"
+                                                >
+                                                    <div class="mb-3 flex items-center justify-between gap-3">
+                                                        <h2
+                                                            id="theater-people-title"
+                                                            class="hidden text-sm font-medium theater:block"
                                                         >
-                                                            "Keeper picks the programme · Co-keepers lend a hand · Companions bring the company"
+                                                            "People"
+                                                        </h2>
+                                                        <p
+                                                            id="role-label"
+                                                            class="text-[11px] text-muted-foreground"
+                                                        >
+                                                            "Connecting…"
                                                         </p>
                                                     </div>
+                                                    <ul
+                                                        id="members"
+                                                        class="m-0 flex max-h-[112px] list-none flex-wrap gap-2 overflow-y-auto p-0 [scrollbar-width:thin] theater:max-h-none"
+                                                        aria-label="Room members"
+                                                    ></ul>
+                                                    <p
+                                                        id="members-help"
+                                                        class="mt-3 text-[10px] leading-relaxed text-muted-foreground theater:hidden"
+                                                    >
+                                                        "Keeper picks the programme · Co-keepers lend a hand · Companions bring the company"
+                                                    </p>
                                                 </div>
                                             </details>
                                             <button
                                                 id="theater-toggle"
                                                 class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-3 text-xs text-foreground/80 hover:bg-foreground/5"
                                                 type="button"
-                                                aria-label="Theater mode"
                                                 aria-pressed="false"
                                                 aria-controls="main"
                                                 hidden=(true)
@@ -865,7 +876,12 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                                         stroke-width="1.5"
                                                     ></rect>
                                                 </svg>
-                                                <span id="theater-label">"Theater mode"</span>
+                                                <span
+                                                    id="theater-label"
+                                                    class="@max-[543px]/theater-footer:sr-only"
+                                                >
+                                                    "Theater mode"
+                                                </span>
                                             </button>
                                         </div>
                                     </div>
@@ -881,7 +897,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                             </div>
                             <aside
                                 id="room-chat"
-                                class="relative flex h-[clamp(360px,60svh,540px)] min-w-0 flex-col overflow-hidden rounded-[14px] border border-border bg-card min-[1001px]:h-[clamp(380px,calc(100svh-112px),760px)]"
+                                class="relative flex h-[clamp(360px,60svh,540px)] min-w-0 flex-col overflow-hidden rounded-[14px] border border-border bg-card min-[761px]:h-[clamp(380px,calc(100svh-112px),760px)] theater:hidden"
                                 aria-labelledby="chat-title"
                             >
                                 <div

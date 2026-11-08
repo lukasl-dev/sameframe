@@ -2,6 +2,7 @@
 @source "./src/**/*.rs";
 @source "./assets/room.js";
 @custom-variant dark (&:is(.dark *));
+@custom-variant theater (&:where(body[data-theater="true"], body[data-theater="true"] *));
 
 @theme inline {
   --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -113,7 +114,7 @@
     padding: 10px 12px;
     color: var(--text);
     background: var(--base);
-    border: 2px solid var(--surface1);
+    border: 1px solid var(--surface1);
     border-radius: 9px;
     font-size: 16px;
     line-height: 1.4;
@@ -121,12 +122,13 @@
   }
   input::placeholder { color: var(--muted); opacity: .85; }
   input:hover { border-color: var(--muted); }
+  input:focus-visible { outline-offset: 2px; }
   input[readonly] { color: var(--subtext); font-size: .875rem; }
   label { display: block; color: var(--text); font-size: .875rem; font-weight: 550; margin-bottom: 7px; }
   button:disabled { cursor: not-allowed; opacity: .5; }
 }
 
-input:focus { border-color: color-mix(in srgb, var(--lavender) 70%, transparent); outline: none; }
+input:focus { border-color: color-mix(in srgb, var(--lavender) 70%, var(--base)); }
 
 @layer components {
   .skip-link { position: fixed; z-index: 30; top: 10px; left: 10px; padding: 12px 18px; border-radius: 8px; background: var(--primary); color: var(--primary-foreground); transform: translateY(-150%); }
@@ -160,43 +162,6 @@ input:focus { border-color: color-mix(in srgb, var(--lavender) 70%, transparent)
   }
 }
 
-body[data-theater="true"] {
-  overflow: hidden;
-}
-
-body[data-theater="true"] #main {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-  width: 100%;
-  max-width: none;
-  padding: 0;
-  background: var(--crust);
-}
-
-body[data-theater="true"] :is(#room-header, #room-chat) {
-  display: none;
-}
-
-body[data-theater="true"] #room-layout {
-  display: block;
-}
-
-body[data-theater="true"] #player-shell {
-  container: theater-footer / inline-size;
-  display: flex;
-  height: 100dvh;
-  flex-direction: column;
-}
-
-body[data-theater="true"] #player-frame {
-  flex: 1;
-  min-height: 0;
-  aspect-ratio: auto;
-  border: 0;
-  border-radius: 0;
-}
-
 body[data-theater="true"] #player-caption {
   display: grid;
   grid-template-columns: minmax(104px, 1fr) minmax(280px, 560px) max-content minmax(104px, 1fr);
@@ -207,15 +172,12 @@ body[data-theater="true"] #player-caption {
   padding: 6px max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
 }
 
-body[data-theater="true"] :is(#theater-video, #theater-people-title) {
-  display: block;
-}
-
-body[data-theater="true"] :is(#members-help, #theater-toggle svg, #room-panel-label, #member-count) {
+body[data-theater="true"] #theater-toggle svg {
   display: none;
 }
 
 body[data-theater="true"] #theater-video {
+  display: block;
   grid-column: 2;
   grid-row: 1;
   width: 100%;
@@ -233,12 +195,6 @@ body[data-theater="true"] #room-members {
   border: 0;
 }
 
-body[data-theater="true"] #members-summary {
-  display: flex;
-  align-items: center;
-  padding: 0 4px;
-}
-
 body[data-theater="true"] #playback-status {
   grid-column: 1;
   grid-row: 1;
@@ -250,7 +206,7 @@ body[data-theater="true"] #theater-toggle {
   justify-self: end;
 }
 
-body[data-theater="true"] :is(#room-notice, #join-playback, #reconnect-button) {
+body[data-theater="true"] :is(#room-notice, #chat-error, #join-playback, #reconnect-button) {
   grid-column: 1 / -1;
   justify-self: center;
   margin: 0;
@@ -270,15 +226,6 @@ body[data-theater="true"] #video-toggle {
   width: 32px;
 }
 
-body[data-theater="true"] #members-summary::marker {
-  content: "";
-}
-
-body[data-theater="true"] #member-avatars {
-  display: flex;
-  align-items: center;
-}
-
 body[data-theater="true"] #member-avatars > * {
   display: grid;
   width: 32px;
@@ -295,46 +242,6 @@ body[data-theater="true"] #member-avatars > * {
 
 body[data-theater="true"] #member-avatars > :first-child {
   margin-left: 0;
-}
-
-body[data-theater="true"] #room-panel {
-  position: absolute;
-  z-index: 30;
-  bottom: 100%;
-  right: 12px;
-  width: min(360px, calc(100% - 24px));
-  max-height: min(420px, 50dvh);
-  overflow-y: auto;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px 12px 0 0;
-  background: var(--mantle);
-}
-
-body[data-theater="true"] #host-controls {
-  margin: 0;
-}
-
-body[data-theater="true"] #video-form {
-  align-items: center;
-}
-
-body[data-theater="true"] #video-url {
-  height: 36px;
-  min-height: 36px;
-  font-size: 16px;
-  line-height: 1.25;
-  padding-block: 4px;
-}
-
-body[data-theater="true"] #members {
-  max-height: none;
-}
-
-@container theater-footer (max-width: 923px) {
-  #playback-status {
-    display: none;
-  }
 }
 
 @container theater-footer (max-width: 659px) {
@@ -365,10 +272,6 @@ body[data-theater="true"] #members {
     justify-self: start;
   }
 
-  #video-toggle {
-    display: flex;
-  }
-
   #host-controls {
     position: absolute;
     z-index: 30;
@@ -382,16 +285,13 @@ body[data-theater="true"] #members {
     background: var(--mantle);
   }
 
-  #theater-video[data-open="true"] #host-controls {
+  #theater-video[data-open="true"] #host-controls,
+  #host-controls:focus-within {
     display: block;
   }
 
   body[data-theater="true"] #theater-toggle svg {
     display: block;
-  }
-
-  #theater-label {
-    display: none;
   }
 }
 

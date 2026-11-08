@@ -42,11 +42,22 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
   const players = [];
   const get = (name) => {
     if (!nodes.has(name)) {
-      const node = { tagName: 'DIV', parentNode: { append(node) { nodes.set(node.id, node); } },
+      const node = { id: name, tagName: 'DIV', parentNode: { append(node) { nodes.set(node.id, node); } },
         disabled: false, value: '', events: {}, dataset: {}, children: [],
         replaceChildren(...children) { this.children = children; this.replacements = (this.replacements ?? 0) + 1; },
-        append(...children) { this.children.push(...children); },
-        before(node) { this.previousSibling = node; },
+        append(...children) {
+          for (const child of children) {
+            if (child.parentNode?.children) child.parentNode.children = child.parentNode.children.filter(node => node !== child);
+            child.parentNode = this;
+            this.children.push(child);
+          }
+        },
+        before(node) {
+          if (node.parentNode?.children) node.parentNode.children = node.parentNode.children.filter(child => child !== node);
+          node.parentNode = this.parentNode;
+          this.parentNode.children.splice(this.parentNode.children.indexOf(this), 0, node);
+          this.previousSibling = node;
+        },
         querySelector(tag) { return this.children.find(child => child.tagName?.toLowerCase() === tag) ?? null; },
         contains(node) { return node === this || this.children.some(child => child === node || child.contains?.(node)); },
         scrollTop: 0, scrollHeight: 300, clientHeight: 300,
@@ -77,9 +88,16 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     head: { scripts: [], append(script) { this.scripts.push(script); } } };
 
   get('members-summary').tagName = 'SUMMARY';
+  get('room-members').open = true;
   get('room-members').append(get('members-summary'), get('room-panel'));
-  get('room-panel').append(get('members-panel'));
   get('theater-video').append(get('video-toggle'));
+  get('video-form').append(get('video-url'), get('load-video'));
+  get('host-controls').append(get('video-form'));
+  get('player-caption').append(get('theater-video'), get('room-members'), get('theater-toggle'));
+  get('player-shell').append(get('player-mount'), get('player-caption'));
+  get('shared-player').append(get('player-shell'));
+  get('room-layout').append(get('host-controls'), get('shared-player'));
+  get('room-chat').append(get('chat-error'), get('chat-form'));
 
   class WebSocket {
     static OPEN = 1;
@@ -277,6 +295,11 @@ const commands = (ws) => ws.sent.filter((message) => message.type === 'command')
 const socialCommands = (ws) => ws.sent.filter((message) => message.type === 'social');
 const event = (id, kind, overrides = {}) => ({ id, kind, at_ms: 1000, member_id: 1,
   name: 'Sleepy Waffle', avatar: '0123456789abcdef', text: null, video_id: null, position_secs: null, ...overrides });
+const escape = (b, overrides = {}) => {
+  const event = { key: 'Escape', preventDefault() { this.defaultPrevented = true; }, ...overrides };
+  b.documentEvents.get('keydown')(event);
+  return event;
+};
 
 test('theater mode toggles without changing playback and Escape restores focus', async () => {
   const b = await browser();
@@ -292,14 +315,14 @@ test('theater mode toggles without changing playback and Escape restores focus',
   assert.equal(b.get('room-members').open, false);
   const members = b.get('members').children;
   b.get('room-members').open = true;
-  b.documentEvents.get('keydown')({ key: 'Escape' });
+  assert.equal(escape(b).defaultPrevented, true);
   assert.equal(b.get('room-members').open, false);
   assert.equal(b.document.body.dataset.theater, 'true');
   assert.equal(b.document.activeElement, b.get('members-summary'));
   assert.equal(b.get('members').children, members);
   b.documentEvents.get('keydown')({ key: 'Enter' });
   assert.equal(b.document.body.dataset.theater, 'true');
-  b.documentEvents.get('keydown')({ key: 'Escape' });
+  escape(b);
   assert.equal(b.document.body.dataset.theater, 'false');
   assert.equal(b.get('theater-toggle')['aria-pressed'], 'false');
   assert.equal(b.get('theater-label').textContent, 'Theater mode');
@@ -317,7 +340,7 @@ test('theater room panel dismisses on outside pointer or window blur, not on pan
   const b = await browser();
   const menu = b.get('room-members');
   const action = b.get('menu-action');
-  b.get('members-panel').append(action);
+  b.get('room-panel').append(action);
   b.click('theater-toggle');
   menu.open = true;
 
@@ -351,7 +374,7 @@ test('narrow theater video control reuses the form, preserves drafts, and keeps 
     b.click('video-toggle');
     assert.equal(video.dataset.open, 'true');
     assert.equal(b.document.activeElement, b.get('video-url'));
-    b.documentEvents.get('keydown')({ key: 'Escape' });
+    escape(b);
     assert.equal(video.dataset.open, 'false');
     assert.equal(b.document.body.dataset.theater, 'true');
     assert.equal(b.document.activeElement, b.get('video-toggle'));
@@ -414,6 +437,64 @@ test('theater avatars show three members and an exact overflow count as membersh
     assert.ok(b.get('members-summary').title.includes('Sleepy Waffle'));
     assert.equal(b.get('members').children.length, count);
   }
+});
+
+test('theater restores the normal people disclosure and leaves consumed Escape alone', async () => {
+  const b = await browser();
+  b.get('room-members').open = false;
+  b.click('theater-toggle');
+  escape(b, { defaultPrevented: true });
+  escape(b, { isComposing: true });
+  assert.equal(b.document.body.dataset.theater, 'true');
+  escape(b);
+  assert.equal(b.get('room-members').open, false);
+});
+
+test('theater keeps proposal rejection and timeout feedback outside the hidden chat', async () => {
+  for (const timeout of [false, true]) {
+    const b = await browser();
+    const ws = await b.welcome(initial(), 'guest');
+    b.click('theater-toggle');
+    b.click('video-toggle');
+    b.get('video-url').value = `https://youtu.be/${id}`;
+    b.submit('video-form');
+    if (timeout) b.fireTimer(8000);
+    else ws.receive({ type: 'error', id: socialCommands(ws)[0].id, message: 'Please wait before suggesting again.' });
+    assert.equal(b.get('theater-video').dataset.open, 'false');
+    assert.equal(b.get('chat-error').hidden, false);
+    assert.equal(b.get('chat-error').parentNode, b.get('player-caption'));
+    assert.equal(b.get('video-url').value, `https://youtu.be/${id}`);
+    b.click('theater-toggle');
+    assert.equal(b.get('chat-error').parentNode, b.get('room-chat'));
+    assert.equal(b.get('room-chat').children[0], b.get('chat-error'));
+    assert.equal(b.get('chat-error').hidden, false);
+  }
+});
+
+test('theater panel focus survives resize and never stays in a dismissed panel', async () => {
+  const b = await browser();
+  b.click('theater-toggle');
+  b.get('video-url').focus();
+  b.windowEvents.get('resize')();
+  assert.equal(b.get('theater-video').dataset.open, 'true');
+  b.windowEvents.get('blur')();
+  assert.equal(b.document.activeElement, b.get('video-toggle'));
+  assert.equal(b.get('theater-video').dataset.open, 'false');
+
+  b.click('video-toggle');
+  b.get('members-summary').focus();
+  b.documentEvents.get('focusin')({ target: b.get('members-summary') });
+  assert.equal(b.get('theater-video').dataset.open, 'false');
+  b.get('room-members').open = true;
+  b.get('theater-toggle').focus();
+  b.documentEvents.get('focusin')({ target: b.get('theater-toggle') });
+  assert.equal(b.get('room-members').open, false);
+
+  b.get('video-toggle').getClientRects = () => [];
+  b.get('video-url').focus();
+  b.windowEvents.get('resize')();
+  assert.equal(b.get('theater-video').dataset.open, 'false');
+  assert.equal(b.document.activeElement, b.get('video-url'));
 });
 
 test('server-issued room identity survives reconnect and reload without granting Keeper access', async () => {

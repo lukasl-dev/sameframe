@@ -659,7 +659,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             name="video"
                                             type="text"
                                             required=(true)
-                                            placeholder="What shall we watch? Paste a YouTube link…"
+                                            placeholder="Paste a YouTube link…"
                                             autocomplete="off"
                                             autocapitalize="none"
                                             spellcheck="false"
@@ -738,6 +738,31 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             <span id="playback-status" class="min-w-0 flex-1 truncate">
                                                 "YouTube · waiting for a video"
                                             </span>
+                                            <div id="theater-video" class="hidden">
+                                                <button
+                                                    id="video-toggle"
+                                                    class="hidden size-11 items-center justify-center rounded-lg text-foreground/80 hover:bg-foreground/5"
+                                                    type="button"
+                                                    aria-label="Change or suggest a video"
+                                                    title="Change or suggest a video"
+                                                    aria-expanded="false"
+                                                    aria-controls="host-controls"
+                                                >
+                                                    <svg
+                                                        class="size-5"
+                                                        viewBox="0 0 20 20"
+                                                        fill="none"
+                                                        aria-hidden="true"
+                                                    >
+                                                        <path
+                                                            d="M8 12L12 8M7 6L8.5 4.5A4.25 4.25 0 0 1 14.5 10.5L13 12M7 8L5.5 9.5A4.25 4.25 0 0 0 11.5 15.5L13 14"
+                                                            stroke="currentColor"
+                                                            stroke-width="1.5"
+                                                            stroke-linecap="round"
+                                                        ></path>
+                                                    </svg>
+                                                </button>
+                                            </div>
                                             <span
                                                 id="room-notice"
                                                 class="min-w-0 flex-1 truncate text-right"
@@ -764,14 +789,20 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                             <details
                                                 id="room-members"
                                                 class="order-last mt-4 w-full border-t border-border pt-3.5"
-                                                name="theater-menu"
                                                 open=(true)
                                             >
                                                 <summary
                                                     id="members-summary"
                                                     class="min-h-11 cursor-pointer content-center rounded-lg px-3 text-xs font-medium text-foreground/80 hover:bg-foreground/5"
                                                 >
-                                                    "People"
+                                                    <span id="room-panel-label">"People"</span>
+                                                    <span
+                                                        id="member-avatars"
+                                                        class="hidden"
+                                                        aria-hidden="true"
+                                                    >
+                                                        "…"
+                                                    </span>
                                                     <span
                                                         id="member-count"
                                                         class="ml-1 text-[11px] text-muted-foreground"
@@ -779,41 +810,41 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                                         "—"
                                                     </span>
                                                 </summary>
-                                                <div id="members-panel">
-                                                    <p
-                                                        id="role-label"
-                                                        class="mb-3 text-[11px] text-muted-foreground"
-                                                    >
-                                                        "Connecting…"
-                                                    </p>
-                                                    <ul
-                                                        id="members"
-                                                        class="m-0 flex max-h-[112px] list-none flex-wrap gap-2 overflow-y-auto p-0 [scrollbar-width:thin]"
-                                                        aria-label="Room members"
-                                                    ></ul>
-                                                    <p
-                                                        class="mt-3 text-[10px] leading-relaxed text-muted-foreground"
-                                                    >
-                                                        "Keeper picks the programme · Co-keepers lend a hand · Companions bring the company"
-                                                    </p>
+                                                <div id="room-panel">
+                                                    <div id="members-panel">
+                                                        <div class="mb-3 flex items-center justify-between gap-3">
+                                                            <h2
+                                                                id="theater-people-title"
+                                                                class="hidden text-sm font-medium"
+                                                            >
+                                                                "People"
+                                                            </h2>
+                                                            <p
+                                                                id="role-label"
+                                                                class="text-[11px] text-muted-foreground"
+                                                            >
+                                                                "Connecting…"
+                                                            </p>
+                                                        </div>
+                                                        <ul
+                                                            id="members"
+                                                            class="m-0 flex max-h-[112px] list-none flex-wrap gap-2 overflow-y-auto p-0 [scrollbar-width:thin]"
+                                                            aria-label="Room members"
+                                                        ></ul>
+                                                        <p
+                                                            id="members-help"
+                                                            class="mt-3 text-[10px] leading-relaxed text-muted-foreground"
+                                                        >
+                                                            "Keeper picks the programme · Co-keepers lend a hand · Companions bring the company"
+                                                        </p>
+                                                    </div>
                                                 </div>
-                                            </details>
-                                            <details
-                                                id="video-menu"
-                                                class="hidden"
-                                                name="theater-menu"
-                                            >
-                                                <summary
-                                                    id="video-summary"
-                                                    class="min-h-11 cursor-pointer content-center rounded-lg px-3 text-xs font-medium text-foreground/80 hover:bg-foreground/5"
-                                                >
-                                                    "Change video"
-                                                </summary>
                                             </details>
                                             <button
                                                 id="theater-toggle"
                                                 class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-3 text-xs text-foreground/80 hover:bg-foreground/5"
                                                 type="button"
+                                                aria-label="Theater mode"
                                                 aria-pressed="false"
                                                 aria-controls="main"
                                                 hidden=(true)

@@ -51,6 +51,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
         contains(node) { return node === this || this.children.some(child => child === node || child.contains?.(node)); },
         scrollTop: 0, scrollHeight: 300, clientHeight: 300,
         setAttribute(key, value) { this[key] = value; },
+        getClientRects() { return [{}]; },
         focus() { document.activeElement = this; },
         toggleAttribute(attr, value) { writes.push([name, attr, value]); this[attr] = value; },
         addEventListener(event, fn) { this.events[event] = fn; } };
@@ -75,10 +76,10 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
       append(...children) { this.children.push(...children); } }; },
     head: { scripts: [], append(script) { this.scripts.push(script); } } };
 
-  for (const [menu, summary] of [['room-members', 'members-summary'], ['video-menu', 'video-summary']]) {
-    get(summary).tagName = 'SUMMARY';
-    get(menu).append(get(summary));
-  }
+  get('members-summary').tagName = 'SUMMARY';
+  get('room-members').append(get('members-summary'), get('room-panel'));
+  get('room-panel').append(get('members-panel'));
+  get('theater-video').append(get('video-toggle'));
 
   class WebSocket {
     static OPEN = 1;
@@ -312,63 +313,58 @@ test('theater mode toggles without changing playback and Escape restores focus',
   assert.equal(commands(ws).length, 0);
 });
 
-test('theater menus dismiss on outside pointer or window blur, not on menu interaction or in normal mode', async () => {
-  for (const [menuId, summaryId, panelId] of [
-    ['room-members', 'members-summary', 'members-panel'], ['video-menu', 'video-summary', 'host-controls'],
-  ]) {
-    const b = await browser();
-    const menu = b.get(menuId);
-    const action = b.get('menu-action');
-    const panel = b.get(panelId);
-    menu.append(panel);
-    panel.append(action);
-    b.click('theater-toggle');
-    menu.open = true;
+test('theater room panel dismisses on outside pointer or window blur, not on panel interaction or in normal mode', async () => {
+  const b = await browser();
+  const menu = b.get('room-members');
+  const action = b.get('menu-action');
+  b.get('members-panel').append(action);
+  b.click('theater-toggle');
+  menu.open = true;
 
-    for (const target of [b.get(summaryId), panel, action]) {
-      b.documentEvents.get('pointerdown')({ target });
-      assert.equal(menu.open, true);
-    }
-    b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
-    assert.equal(menu.open, false);
-    assert.equal(b.document.body.dataset.theater, 'true');
-    menu.open = true;
-    b.windowEvents.get('blur')();
-    assert.equal(menu.open, false);
-
-    b.click('theater-toggle');
-    menu.open = true;
-    b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
-    b.windowEvents.get('blur')();
+  for (const target of [b.get('members-summary'), b.get('room-panel'), action]) {
+    b.documentEvents.get('pointerdown')({ target });
     assert.equal(menu.open, true);
   }
+  b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
+  assert.equal(menu.open, false);
+  assert.equal(b.document.body.dataset.theater, 'true');
+  menu.open = true;
+  b.windowEvents.get('blur')();
+  assert.equal(menu.open, false);
+
+  b.click('theater-toggle');
+  b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
+  b.windowEvents.get('blur')();
+  assert.equal(menu.open, true);
 });
 
-test('theater video menu reuses the form, preserves drafts, and keeps role permissions and validation', async () => {
+test('narrow theater video control reuses the form, preserves drafts, and keeps role permissions and validation', async () => {
   for (const role of ['host', 'moderator', 'guest']) {
     const b = await browser();
     const ws = await b.welcome(initial(), role);
     b.get('video-url').value = 'unfinished draft';
     b.click('theater-toggle');
-    const menu = b.get('video-menu');
-    assert.equal(menu.open, false);
-    assert.ok(menu.contains(b.get('host-controls')));
+    const video = b.get('theater-video');
+    assert.equal(video.dataset.open, 'false');
+    assert.ok(video.contains(b.get('host-controls')));
     assert.equal(b.get('video-url').value, 'unfinished draft');
-    menu.open = true;
+    b.click('video-toggle');
+    assert.equal(video.dataset.open, 'true');
+    assert.equal(b.document.activeElement, b.get('video-url'));
     b.documentEvents.get('keydown')({ key: 'Escape' });
-    assert.equal(menu.open, false);
+    assert.equal(video.dataset.open, 'false');
     assert.equal(b.document.body.dataset.theater, 'true');
-    assert.equal(b.document.activeElement, b.get('video-summary'));
+    assert.equal(b.document.activeElement, b.get('video-toggle'));
 
-    menu.open = true;
+    b.click('video-toggle');
     b.submit('video-form');
-    assert.equal(menu.open, true);
+    assert.equal(video.dataset.open, 'true');
     assert.match(b.get('room-error').textContent, /valid YouTube/);
     assert.equal(commands(ws).length + socialCommands(ws).length, 0);
     b.get('video-url').value = `https://youtu.be/${id}`;
     b.submit('video-form');
-    assert.equal(menu.open, false);
-    assert.equal(b.document.activeElement, b.get('video-summary'));
+    assert.equal(video.dataset.open, 'false');
+    assert.equal(b.document.activeElement, b.get('video-toggle'));
     if (role === 'guest') {
       assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', video_id: id });
       assert.equal(commands(ws).length, 0);
@@ -379,6 +375,44 @@ test('theater video menu reuses the form, preserves drafts, and keeps role permi
     b.click('theater-toggle');
     assert.equal(b.get('shared-player').previousSibling, b.get('host-controls'));
     assert.equal(b.get('video-url').value, `https://youtu.be/${id}`);
+  }
+});
+
+test('collapsed video control dismisses outside and yields to the people list', async () => {
+  const b = await browser();
+  b.click('theater-toggle');
+  const video = b.get('theater-video');
+  const people = b.get('room-members');
+  b.click('video-toggle');
+  for (const target of [b.get('video-toggle'), b.get('host-controls')]) {
+    b.documentEvents.get('pointerdown')({ target });
+    assert.equal(video.dataset.open, 'true');
+  }
+  b.documentEvents.get('pointerdown')({ target: b.get('playback-status') });
+  assert.equal(video.dataset.open, 'false');
+  b.click('video-toggle');
+  b.windowEvents.get('blur')();
+  assert.equal(video.dataset.open, 'false');
+  b.click('video-toggle');
+  people.open = true;
+  people.events.toggle();
+  assert.equal(video.dataset.open, 'false');
+  b.click('video-toggle');
+  assert.equal(people.open, false);
+});
+
+test('theater avatars show three members and an exact overflow count as membership changes', async () => {
+  const b = await browser();
+  const ws = await b.welcome();
+  for (const count of [1, 3, 7, 32, 2]) {
+    b.state(ws, initial({ members: count }));
+    const avatars = b.get('member-avatars').children;
+    assert.equal(avatars.filter(node => node.tagName === 'svg').length, Math.min(count, 3));
+    assert.equal(avatars.length, Math.min(count, 3) + (count > 3 ? 1 : 0));
+    if (count > 3) assert.equal(avatars.at(-1).textContent, `+${count - 3}`);
+    assert.equal(b.get('members-summary')['aria-label'], `Room members: ${count}`);
+    assert.ok(b.get('members-summary').title.includes('Sleepy Waffle'));
+    assert.equal(b.get('members').children.length, count);
   }
 });
 

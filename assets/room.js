@@ -5,43 +5,62 @@ const text = (id, value) => {
   node.textContent = value;
   if (['room-error', 'room-notice', 'chat-error'].includes(id)) node.hidden = !value;
 };
-const theaterMenus = ['room-members', 'video-menu'];
-
 function setTheaterMode(active) {
   document.body.dataset.theater = String(active);
   element('theater-toggle')?.setAttribute('aria-pressed', String(active));
   text('theater-label', active ? 'Exit theater' : 'Theater mode');
+  element('theater-toggle')?.setAttribute('aria-label', active ? 'Exit theater' : 'Theater mode');
+  if (element('theater-toggle')) element('theater-toggle').title = active ? 'Exit theater' : 'Theater mode';
+  setVideoExpanded(false);
   if (element('room-members')) element('room-members').open = !active;
-  if (element('video-menu')) element('video-menu').open = false;
   const controls = element('host-controls');
   if (controls) {
-    if (active) element('video-menu')?.append(controls);
+    if (active) element('theater-video')?.append(controls);
     else element('shared-player')?.before(controls);
   }
   if (!active) element('theater-toggle')?.focus();
 }
 
+function setVideoExpanded(active) {
+  if (element('theater-video')) element('theater-video').dataset.open = String(active);
+  element('video-toggle')?.setAttribute('aria-expanded', String(active));
+  if (active && element('room-members')) element('room-members').open = false;
+}
+
+element('video-toggle')?.addEventListener('click', () => {
+  const active = element('theater-video')?.dataset.open !== 'true';
+  setVideoExpanded(active);
+  if (active) element('video-url')?.focus();
+});
+element('room-members')?.addEventListener('toggle', () => {
+  if (element('room-members')?.open) setVideoExpanded(false);
+});
 element('theater-toggle')?.addEventListener('click', () => {
   setTheaterMode(document.body.dataset.theater !== 'true');
 });
 if (element('theater-toggle')) element('theater-toggle').hidden = false;
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || document.body.dataset.theater !== 'true') return;
-  const menu = theaterMenus.map(element).find(menu => menu?.open);
-  if (menu) {
+  const menu = element('room-members');
+  if (menu?.open) {
     menu.open = false;
     menu.querySelector('summary')?.focus();
+  } else if (element('theater-video')?.dataset.open === 'true' && element('video-toggle')?.getClientRects().length) {
+    setVideoExpanded(false);
+    element('video-toggle')?.focus();
   } else setTheaterMode(false);
 });
 document.addEventListener('pointerdown', (event) => {
   if (document.body.dataset.theater !== 'true') return;
-  for (const menu of theaterMenus.map(element)) {
-    if (menu?.open && !menu.contains(event.target)) menu.open = false;
-  }
+  const menu = element('room-members');
+  if (menu?.open && !menu.contains(event.target)) menu.open = false;
+  const video = element('theater-video');
+  if (video?.dataset.open === 'true' && !video.contains(event.target)) setVideoExpanded(false);
 });
 window.addEventListener('blur', () => {
   if (document.body.dataset.theater !== 'true') return;
-  for (const menu of theaterMenus.map(element)) if (menu) menu.open = false;
+  if (element('room-members')) element('room-members').open = false;
+  setVideoExpanded(false);
 });
 
 const roomId = document.body.dataset.roomId;
@@ -339,6 +358,18 @@ if (helpers) {
       return item;
     });
     list.replaceChildren(...nodes);
+
+    const group = element('member-avatars');
+    if (group) {
+      group.replaceChildren(...snapshot.participants.slice(0, 3).map(member => avatar(member.avatar, 'size-8 shrink-0 rounded-full')));
+      if (snapshot.participants.length > 3) {
+        const more = document.createElement('span');
+        more.textContent = `+${snapshot.participants.length - 3}`;
+        group.append(more);
+      }
+    }
+    element('members-summary')?.setAttribute('aria-label', `Room members: ${snapshot.members}`);
+    if (element('members-summary')) element('members-summary').title = snapshot.participants.map(member => member.name).join(', ');
   }
 
   function render() {
@@ -1017,9 +1048,9 @@ if (helpers) {
     }
     const submitted = canControl() ? command({ type: 'set_video', video_id: videoId })
       : social({ type: 'propose_video', video_id: videoId }, 'video-url');
-    if (submitted && element('video-menu')?.open) {
-      element('video-menu').open = false;
-      element('video-summary')?.focus();
+    if (submitted && element('theater-video')?.dataset.open === 'true') {
+      setVideoExpanded(false);
+      if (element('video-toggle')?.getClientRects().length) element('video-toggle').focus();
     }
   });
   element('chat-form')?.addEventListener('submit', (event) => {

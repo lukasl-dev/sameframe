@@ -69,10 +69,18 @@ never create a banner; routine notices stay in the player caption.
 ## Reconnect regressions
 
 Backend and socket tests check room-scoped signed identity tokens: stable name and
-avatar across reconnects, fresh membership IDs, separate permissions/retry budgets,
+avatar across reconnects, fresh membership IDs, separate identity-only permissions/retry budgets,
 invalid/cross-room rejection, concurrent tabs, and no token in public snapshots.
 Browser tests check localStorage persistence, blocked-storage fallback, and one
 fresh-identity retry without losing or granting Keeper access.
+
+Session-resume coverage checks paired per-tab credentials, Co-keeper retention
+within 60 seconds, offline revocation, grace expiry and bounded eviction, active
+socket takeover, stale-lease cleanup, retained rate budgets and suppressed
+leave/join activity. Keeper access still requires its own token. Browser tests
+check same-tab reload versus independent tabs and a foreground grace period for
+fresh application state after long hidden intervals. Transport tests check
+control-Ping/Pong liveness without application heartbeats.
 
 Playback harness tests delay corrective iframe writes across multiple samples and
 deliver them one callback at a time. Same-incarnation welcomes must not fabricate
@@ -122,6 +130,12 @@ session storage. Check desktop and a narrow mobile viewport.
 11. Check join/leave, play/pause/seek and speed activity. Scroll up in chat:
     incoming messages must not pull you down; the new-message button returns
     to the bottom. Disconnect while sending: preserve the draft on failure.
+12. In Firefox, background a Co-keeper tab for over a minute, then return. A
+    responsive socket should stay connected without presence spam. Briefly
+    disconnect or reload that tab: it should keep its grant without leave/join
+    activity. A separate tab with only the shared identity stays a Companion.
+    After a confirmed departure exceeds 60 seconds, resumption must not restore
+    the expired grant.
 
 Watch the console for application exceptions. The YouTube widget can emit
 its own initialization warnings; distinguish those from application failures.

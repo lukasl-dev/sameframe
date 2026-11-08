@@ -166,7 +166,7 @@ async fn public_websockets_need_no_site_key_but_guests_still_cannot_control_play
 }
 
 #[tokio::test]
-async fn member_identity_reconnects_privately_with_new_socket_id_and_without_moderator_authority() {
+async fn identity_without_session_credentials_reconnects_privately_without_moderator_authority() {
     let server = TestServer::start().await;
     let created = server.rooms.create().unwrap();
     let mut host = server.connect(&created.room_id).await;
@@ -315,6 +315,143 @@ async fn invalid_member_tokens_fail_real_socket_joins_even_with_valid_host_crede
     assert_eq!(shared["members"], 1);
     assert_eq!(shared["participants"][0]["id"], welcome["member_id"]);
     original.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_credentials_preserve_roles_and_presence_over_real_sockets_without_restoring_revoked_grants()
+ {
+    let server = TestServer::start().await;
+    let created = server.rooms.create().unwrap();
+    let mut host = server.connect(&created.room_id).await;
+    join(&mut host, Some(&created.host_token)).await;
+    let mut guest = server.connect(&created.room_id).await;
+    let welcome = join(&mut guest, None).await;
+    let identity = welcome["member_token"].as_str().unwrap();
+    let resume = welcome["resume_token"].as_str().unwrap();
+    let original_id = welcome["member_id"].as_u64().unwrap();
+    social(
+        &mut host,
+        "grant",
+        json!({"type":"set_moderator", "member_id":original_id, "enabled":true}),
+    )
+    .await;
+    social_result(&mut host, "grant").await;
+    let before = sync_snapshot(&mut host).await;
+
+    guest.close(None).await.unwrap();
+    let departed = receive(&mut host, |message| {
+        message["type"] == "snapshot" && message["snapshot"]["members"] == 1
+    })
+    .await;
+    assert_eq!(departed["snapshot"]["events"], before["events"]);
+    let mut returned = server.connect(&created.room_id).await;
+    send(
+        &mut returned,
+        json!({"type":"join", "member_token":identity, "resume_token":resume}),
+    )
+    .await;
+    let resumed = receive(&mut returned, |message| message["type"] == "welcome").await;
+    assert_eq!(resumed["role"], "moderator");
+    assert_eq!(resumed["resume_token"], resume);
+    assert_ne!(resumed["member_id"], original_id);
+    assert_eq!(resumed["snapshot"]["events"], before["events"]);
+    assert!(!resumed["snapshot"].to_string().contains(resume));
+    command(
+        &mut returned,
+        "load",
+        0,
+        json!({"type":"set_video", "video_id":"dQw4w9WgXcQ"}),
+    )
+    .await;
+    assert_eq!(ack(&mut returned, "load").await["revision"], 1);
+
+    let mut other_tab = server.connect(&created.room_id).await;
+    send(
+        &mut other_tab,
+        json!({"type":"join", "member_token":identity}),
+    )
+    .await;
+    let other = receive(&mut other_tab, |message| message["type"] == "welcome").await;
+    assert_eq!(other["role"], "guest");
+    assert_ne!(other["resume_token"], resume);
+    returned.close(None).await.unwrap();
+    receive(&mut host, |message| {
+        message["type"] == "snapshot" && message["snapshot"]["members"] == 2
+    })
+    .await;
+    social(
+        &mut host,
+        "revoke-offline",
+        json!({"type":"set_moderator", "member_id":resumed["member_id"], "enabled":false}),
+    )
+    .await;
+    assert_eq!(
+        social_result(&mut host, "revoke-offline").await["type"],
+        "social_ack"
+    );
+
+    let mut returned = server.connect(&created.room_id).await;
+    send(
+        &mut returned,
+        json!({"type":"join", "member_token":identity, "resume_token":resume}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut returned, |message| message["type"] == "welcome").await["role"],
+        "guest"
+    );
+    command(
+        &mut returned,
+        "denied",
+        1,
+        json!({"type":"pause", "position_secs":0.0}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut returned, |message| message["type"] == "error"
+            && message["id"] == "denied")
+        .await["code"],
+        "forbidden"
+    );
+    returned.close(None).await.unwrap();
+    other_tab.close(None).await.unwrap();
+    host.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn control_pongs_keep_idle_sockets_alive_without_javascript_heartbeats() {
+    let server = TestServer::start().await;
+    let created = server.rooms.create().unwrap();
+    let mut guest = server.connect(&created.room_id).await;
+    join(&mut guest, None).await;
+    sync_snapshot(&mut guest).await;
+    // Real socket I/O must not advance the paused clock to the next timeout.
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let (ready, running) = tokio::sync::oneshot::channel();
+    let io = tokio::task::spawn_blocking(move || {
+        ready.send(()).unwrap();
+        hold.recv_timeout(Duration::from_secs(5))
+    });
+    running.await.unwrap();
+    tokio::time::pause();
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let message = timeout(Duration::from_secs(5), guest.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(message, Message::Ping(_)));
+        guest.flush().await.unwrap();
+        tokio::task::yield_now().await;
+    }
+    send(&mut guest, json!({"type":"sync"})).await;
+    let snapshot = receive(&mut guest, |message| message["type"] == "snapshot").await;
+    assert_eq!(snapshot["snapshot"]["members"], 1);
+    tokio::time::resume();
+    drop(release);
+    let _ = io.await.unwrap();
+    guest.close(None).await.unwrap();
 }
 
 #[tokio::test]
@@ -655,14 +792,13 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
         message["type"] == "snapshot" && message["snapshot"]["members"] == 1
     })
     .await;
-    let left = departed["snapshot"]["events"]
-        .as_array()
-        .unwrap()
-        .last()
-        .unwrap();
-    assert_eq!(left["kind"], "left");
-    assert_eq!(left["name"], author["name"]);
-    assert_eq!(left["avatar"], author["avatar"]);
+    assert!(
+        departed["snapshot"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["kind"] != "left")
+    );
     assert!(
         departed["snapshot"]["events"]
             .as_array()
@@ -746,7 +882,7 @@ async fn full_escaped_and_nonascii_history_reaches_welcome_live_updates_and_sync
     assert_eq!(text.chars().count(), 500);
 
     for author_index in 0..5 {
-        let author = room.join(None, None).await.unwrap();
+        let author = room.join(None, None, None).await.unwrap();
         for message_index in 0..20 {
             room.social(
                 author.id,

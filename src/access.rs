@@ -561,7 +561,7 @@ mod tests {
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
         let member = room
-            .join(Some(created.host_token.clone()), None)
+            .join(Some(created.host_token.clone()), None, None)
             .await
             .unwrap();
         let snapshot = member.snapshots.borrow().clone();

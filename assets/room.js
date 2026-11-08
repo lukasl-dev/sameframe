@@ -87,8 +87,10 @@ const roomPath = `/room/${encodeURIComponent(roomId ?? '')}`;
 const shareUrl = `${location.origin}${roomPath}`;
 const tokenKey = `sameframe:host:${roomId}`;
 const memberKey = `sameframe:member:${roomId}`;
+const resumeKey = `sameframe:resume:${roomId}`;
 let hostToken = null;
 let memberToken = null;
+let resumeToken = null;
 
 const fragmentToken = new URLSearchParams(location.hash.slice(1)).get('host');
 if (location.hash || location.search || location.pathname !== roomPath) history.replaceState(null, '', roomPath);
@@ -100,6 +102,10 @@ try {
 try {
   const saved = localStorage.getItem(memberKey);
   if (/^[0-9a-f]{96}$/.test(saved ?? '')) memberToken = saved;
+} catch {}
+try {
+  const saved = sessionStorage.getItem(resumeKey);
+  if (/^[0-9a-f]{64}$/.test(saved ?? '')) resumeToken = saved;
 } catch {}
 
 const helpers = await import(document.body.dataset.syncUrl).catch(() => {
@@ -149,7 +155,7 @@ if (helpers) {
   let chatError = '';
 
   let snapshot = null;
-  let lastResponseMs = 0;
+  let responseDeadlineMs = 0;
   let roomError = '';
   let playerError = '';
   let notice = '';
@@ -474,7 +480,7 @@ if (helpers) {
 
   function recover() {
     if (!connected) return;
-    if (performance.now() - lastResponseMs > 30000) {
+    if (performance.now() > responseDeadlineMs) {
       socket?.close();
       return;
     }
@@ -532,20 +538,22 @@ if (helpers) {
     socket = ws;
     joinTimer = setTimeout(() => { if (socket === ws) ws.close(); }, 10000);
     ws.addEventListener('open', () => {
-      if (socket === ws) send({ type: 'join', host_token: hostToken, member_token: memberToken });
+      if (socket === ws) send({ type: 'join', host_token: hostToken, member_token: memberToken, resume_token: resumeToken });
     });
     ws.addEventListener('message', (event) => {
       if (socket !== ws || terminal) return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (!message || typeof message !== 'object') return;
-      lastResponseMs = performance.now();
+      responseDeadlineMs = performance.now() + 30000;
       if (message.type === 'welcome' || message.type === 'snapshot') {
         const welcome = message.type === 'welcome';
         if (welcome && (!['host', 'moderator', 'guest'].includes(message.role)
           || !Number.isSafeInteger(message.member_id) || message.member_id <= 0
           || (message.member_token !== undefined && (typeof message.member_token !== 'string'
-            || !/^[0-9a-f]{96}$/.test(message.member_token))))) return;
+            || !/^[0-9a-f]{96}$/.test(message.member_token)))
+          || (message.resume_token !== undefined && (typeof message.resume_token !== 'string'
+            || !/^[0-9a-f]{64}$/.test(message.resume_token))))) return;
         if (!welcome && !connected) return;
         if (!ordering.accept(message.snapshot, message.server_ms, welcome)) return;
         const previousSnapshot = snapshot;
@@ -561,6 +569,10 @@ if (helpers) {
           if (message.member_token !== undefined) {
             memberToken = message.member_token;
             try { localStorage.setItem(memberKey, memberToken); } catch {}
+          }
+          if (message.resume_token !== undefined) {
+            resumeToken = message.resume_token;
+            try { sessionStorage.setItem(resumeKey, resumeToken); } catch {}
           }
           roomError = '';
           if (!autoplayBlocked) notice = '';
@@ -633,7 +645,9 @@ if (helpers) {
         if (message.code === 'invalid_token') {
           if (memberToken) {
             memberToken = null;
+            resumeToken = null;
             try { localStorage.removeItem(memberKey); } catch {}
+            try { sessionStorage.removeItem(resumeKey); } catch {}
             connect();
             return;
           }
@@ -1127,6 +1141,7 @@ if (helpers) {
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
+    responseDeadlineMs = performance.now() + 30000;
     if (playerReady) beginPlayerRecovery();
     if (!connected) {
       if (!terminal && socket?.readyState === WebSocket.CLOSED) connect();

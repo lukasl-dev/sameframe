@@ -73,7 +73,7 @@ or share links.
 First message, within 10 seconds:
 
 ```json
-{"type":"join","host_token":null,"member_token":null}
+{"type":"join","host_token":null,"member_token":null,"resume_token":null}
 ```
 
 A matching host token grants host control; omission grants guest access. An
@@ -88,13 +88,22 @@ Browsers retain it in localStorage under `sameframe:member:<room_id>` and send i
 on later joins to recover the same name and avatar. Missing tokens create new
 identities. Invalid or cross-room tokens are rejected; the browser can discard a
 rejected identity and retry once. Tokens never appear in snapshots, feed entries,
-or invite links. They convey no playback or moderation permissions.
+or invite links. The identity token alone conveys no playback or moderation permissions.
+
+The welcome also issues a private 64-character `resume_token`, stored in
+sessionStorage under `sameframe:resume:<room_id>`. Send both tokens to resume
+that tab's session. A disconnect retains its Co-keeper grant for 60 seconds;
+the host can revoke it during the interruption. Another tab with only the shared
+identity joins as a Companion. Keeper access always requires the host token.
+Unknown or expired resume credentials create a fresh session without restoring
+permissions. Resume credentials never enter snapshots, activity or invites.
 
 `member_id` identifies this connection in the public participant list. Each new
 identity gets a server-assigned two-word funny name and public random avatar seed.
-Reconnections get a fresh membership ID, with fresh retry history and rate budget,
-but retain the identity. Multiple tabs sharing an identity remain separate members.
-Keeper access still requires the host token; Co-keeper grants remain per connection.
+Reconnections get a fresh membership ID and retry history, retaining the identity.
+Session resumption keeps the rate budget rather than refilling it. It supersedes
+any old socket: the old membership ID cannot act and closing its lease cannot
+remove the replacement. Tabs sharing only an identity remain separate members.
 `room_name` is a random cosy title assigned once, stable for the room's lifetime.
 Avatars are generated locally, with no third-party requests. Identities last only
 as long as their room and do not identify members across different rooms.
@@ -158,7 +167,8 @@ Errors have `id: null` when not associated with a parsed command.
 Social commands are independent of playback: no expected revision, no playback
 `ack`, and no automatic error-recovery snapshot. Every active member may chat or
 propose a video. Proposals do **not** load or change playback. Only hosts may
-change an active guest/moderator's role; hosts cannot be demoted or promoted.
+grant an active guest/moderator's role or revoke it during the reconnect grace
+period; hosts cannot be demoted or promoted.
 The welcome role describes admission; thereafter derive the connection's current
 role from `snapshot.participants` using `member_id`.
 
@@ -198,7 +208,11 @@ into entries, so departure does not erase their identity. Role entries are
 attributed to the host, with target name/new role in `text`; rate entries use
 `text` such as `1.5x`. Proposals/loads include `video_id`; loads include position
 zero, play/pause/seek include their accepted position. Membership and role events
-have no playback position payload. Joining and leaving are logged once.
+have no playback position payload. Initial joins are logged once. Disconnection
+removes the active participant immediately, but `left` activity waits 60 seconds.
+Session resumption cancels that entry without appending another `joined`. Each
+room retains at most 32 disconnected sessions; if this cache fills, the oldest
+departure is confirmed early. Grants and resume credentials expire with the room.
 
 Clients should reconcile retained history by event ID on **every** snapshot,
 even if playback revision is unchanged. Watch coalescing may omit intermediate
@@ -213,7 +227,11 @@ has a write timeout. Bounded actor mailbox, room/member caps, command rate limit
 4096-byte inbound frame/message limits, idle socket timeout, and empty-room expiry bound resource
 use. Playback/social requests share the member's 20-token burst, 10-token/second
 refill; the existing socket limiter and bounded response queue remain independent.
-A reconnecting client joins anew and receives a complete snapshot.
+A reconnecting client receives a complete snapshot, optionally resuming its tab's
+session. WebSocket control Pings every 15 seconds let browsers answer without
+JavaScript timers; the 45-second read timeout still removes unresponsive sockets.
+On foregrounding, clients request fresh state and allow 30 seconds for a response
+instead of counting time spent hidden as a failed application request.
 
 The browser uses the authoritative anchor plus estimated server time to compute
 the current position: while playing, add elapsed server time multiplied by

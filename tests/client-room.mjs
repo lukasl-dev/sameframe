@@ -9,6 +9,7 @@ const roomSource = (await readFile(new URL('../assets/room.js', import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const id = 'dQw4w9WgXcQ';
 const memberToken = 'a'.repeat(96);
+const resumeToken = 'b'.repeat(64);
 
 const initial = (overrides = {}) => {
   const snapshot = { incarnation: 'a', room_name: 'The Sleepy Observatory', events: [], revision: 0, media_revision: 0, playback_rate: 1,
@@ -21,7 +22,7 @@ const initial = (overrides = {}) => {
 
 async function browser({ token = null, api = true, storageBlocked = false, importFailure = false,
   clipboardBlocked = false, query = '', pathname = '/room/test-room', rates = [0.5, 1, 1.5, 2],
-  unavailableInitialCaches = false, memberStorage = new Map() } = {}) {
+  unavailableInitialCaches = false, memberStorage = new Map(), stored = new Map() } = {}) {
   let now = 1000;
   let timerId = 0;
   const timers = new Map();
@@ -33,7 +34,6 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
   const windowEvents = new Map();
 
   let copied = null;
-  const stored = new Map();
   const historyCalls = [];
   const warnings = [];
 
@@ -226,7 +226,8 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     { origin: 'https://sameframe.test', host: 'sameframe.test', protocol: 'https:', pathname, search: query, hash: token ? `#host=${token}` : '' },
     { replaceState(...args) { historyCalls.push(args); } },
     { getItem(key) { if (storageBlocked) throw Error('blocked'); return stored.get(key) ?? null; },
-      setItem(key, value) { if (storageBlocked) throw Error('blocked'); stored.set(key, value); } },
+      setItem(key, value) { if (storageBlocked) throw Error('blocked'); stored.set(key, value); },
+      removeItem(key) { if (storageBlocked) throw Error('blocked'); stored.delete(key); } },
     { getItem(key) { if (storageBlocked) throw Error('blocked'); return memberStorage.get(key) ?? null; },
       setItem(key, value) { if (storageBlocked) throw Error('blocked'); memberStorage.set(key, value); },
       removeItem(key) { if (storageBlocked) throw Error('blocked'); memberStorage.delete(key); } },
@@ -247,7 +248,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     ws.testRole = role;
     snapshot.participants = snapshot.participants.map((member) => member.id === 1 ? { ...member, role } : member);
     ws.open();
-    ws.receive({ type: 'welcome', role, member_id: 1, member_token: memberToken, snapshot, server_ms: now });
+    ws.receive({ type: 'welcome', role, member_id: 1, member_token: memberToken, resume_token: resumeToken, snapshot, server_ms: now });
     await flush();
     return ws;
   };
@@ -508,11 +509,11 @@ test('server-issued room identity survives reconnect and reload without granting
   ws.close();
   b.click('reconnect-button');
   const reconnected = await b.welcome(initial(), 'guest');
-  assert.deepEqual(reconnected.sent[0], { type: 'join', host_token: null, member_token: memberToken });
+  assert.deepEqual(reconnected.sent[0], { type: 'join', host_token: null, member_token: memberToken, resume_token: resumeToken });
 
   const reload = await browser({ memberStorage });
   const fresh = await reload.welcome(initial(), 'guest');
-  assert.deepEqual(fresh.sent[0], { type: 'join', host_token: null, member_token: memberToken });
+  assert.deepEqual(fresh.sent[0], { type: 'join', host_token: null, member_token: memberToken, resume_token: null });
   assert.equal(reload.get('role-label').textContent, 'You’re a Companion');
   assert.equal(reload.historyCalls.length, 0);
   await reload.click('copy-link');
@@ -528,6 +529,42 @@ test('blocked member storage keeps the current room identity in memory for recon
   b.click('reconnect-button');
   const resumed = await b.welcome(initial(), 'guest');
   assert.equal(resumed.sent[0].member_token, memberToken);
+  assert.equal(resumed.sent[0].resume_token, resumeToken);
+});
+
+test('resume credentials survive same-tab reload without sharing Co-keeper authority through localStorage or invites', async () => {
+  const memberStorage = new Map();
+  const stored = new Map();
+  const b = await browser({ memberStorage, stored });
+  await b.welcome(initial(), 'moderator');
+  assert.equal(stored.get('sameframe:resume:test-room'), resumeToken);
+  assert.equal([...memberStorage.values()].includes(resumeToken), false);
+
+  const reload = await browser({ memberStorage, stored });
+  const ws = await reload.welcome(initial(), 'moderator');
+  assert.equal(ws.sent[0].resume_token, resumeToken);
+  assert.equal(reload.get('role-label').textContent, 'You’re a Co-keeper');
+  await reload.click('copy-link');
+  assert.equal(reload.copied, 'https://sameframe.test/room/test-room');
+
+  const otherTab = await browser({ memberStorage });
+  const other = await otherTab.welcome(initial(), 'guest');
+  assert.equal(other.sent[0].member_token, memberToken);
+  assert.equal(other.sent[0].resume_token, null);
+  assert.equal(otherTab.get('role-label').textContent, 'You’re a Companion');
+});
+
+test('malformed resume credentials are neither sent nor accepted', async () => {
+  for (const invalid of ['invalid', [resumeToken], null, 123]) {
+    const b = await browser({ stored: new Map([['sameframe:resume:test-room', 'invalid']]) });
+    const ws = b.sockets[0];
+    ws.open();
+    assert.equal(ws.sent[0].resume_token, null);
+    ws.receive({ type: 'welcome', role: 'moderator', member_id: 1, member_token: memberToken,
+      resume_token: invalid, snapshot: initial(), server_ms: 1000 });
+    assert.notEqual(b.get('connection-status').textContent, 'Connected');
+    assert.equal(b.stored.get('sameframe:resume:test-room'), 'invalid');
+  }
 });
 
 test('rejected saved identity retries without it, but invalid Keeper access still stops', async () => {
@@ -541,7 +578,7 @@ test('rejected saved identity retries without it, but invalid Keeper access stil
   assert.equal(memberStorage.size, 0);
   const retry = b.sockets[1];
   retry.open();
-  assert.deepEqual(retry.sent[0], { type: 'join', host_token: 'wrong-host', member_token: null });
+  assert.deepEqual(retry.sent[0], { type: 'join', host_token: 'wrong-host', member_token: null, resume_token: null });
 
   retry.receive({ type: 'error', code: 'invalid_token', id: null });
   assert.equal(b.get('connection-status').textContent, 'Host access rejected');
@@ -1008,7 +1045,7 @@ test('credentials, clean canonical address and icon-only invite copy remain safe
 
   assert.equal(b.stored.get('sameframe:host:test-room'), 'secret');
   assert.deepEqual(b.historyCalls[0], [null, '', '/room/test-room']);
-  assert.deepEqual(ws.sent[0], { type: 'join', host_token: 'secret', member_token: null });
+  assert.deepEqual(ws.sent[0], { type: 'join', host_token: 'secret', member_token: null, resume_token: null });
 
   await b.click('copy-link');
   assert.equal(b.copied, 'https://sameframe.test/room/test-room');
@@ -1487,17 +1524,23 @@ test('hidden-tab time gaps are not scrubs; visibility sync and silent-open socke
   b.document.hidden = true;
   b.documentEvents.get('visibilitychange')();
   p.time = 20;
-  b.time(20000);
+  b.time(120000);
   b.tick();
+  const sentWhileHidden = ws.sent.length;
+  b.tick(10000);
+  assert.equal(ws.sent.length, sentWhileHidden);
 
   b.document.hidden = false;
   b.documentEvents.get('visibilitychange')();
+  assert.equal(ws.readyState, 1);
+  assert.equal(b.sockets.length, 1);
+  assert.equal(ws.sent.at(-1).type, 'sync');
   p.deliver();
   b.frame();
   b.frame();
   assert.equal(commands(ws).length, 0);
 
-  b.time(60000);
+  b.time(160000);
   b.tick(10000);
   assert.equal(ws.readyState, 3);
 });

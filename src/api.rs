@@ -30,6 +30,7 @@ use crate::rooms::{Action, Role, RoomError, RoomHandle, Rooms, Snapshot, SocialA
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 path_param!(room_id);
@@ -148,6 +149,7 @@ enum ClientMessage {
     Join {
         host_token: Option<String>,
         member_token: Option<String>,
+        resume_token: Option<String>,
     },
     Ping {
         client_ms: f64,
@@ -170,6 +172,7 @@ enum ServerMessage {
     Welcome {
         member_id: u64,
         member_token: String,
+        resume_token: String,
         role: Role,
         snapshot: Snapshot,
         server_ms: u64,
@@ -204,13 +207,14 @@ async fn serve_member(mut socket: WebSocket, room: RoomHandle, rooms: Rooms) {
     let Ok(ClientMessage::Join {
         host_token,
         member_token,
+        resume_token,
     }) = serde_json::from_str(&text)
     else {
         close_socket(&mut socket, 1008, "First message must join the room").await;
         return;
     };
 
-    let member = match room.join(host_token, member_token).await {
+    let member = match room.join(host_token, member_token, resume_token).await {
         Ok(member) => member,
         Err(error) => {
             let _ = send_socket(&mut socket, &failure(error, None)).await;
@@ -223,6 +227,7 @@ async fn serve_member(mut socket: WebSocket, room: RoomHandle, rooms: Rooms) {
     let welcome = ServerMessage::Welcome {
         member_id: member.id,
         member_token: member.member_token,
+        resume_token: member.resume_token,
         role: member.role,
         snapshot: snapshots.borrow_and_update().clone(),
         server_ms: rooms.now_ms(),
@@ -323,10 +328,14 @@ async fn write_updates(
     mut responses: mpsc::Receiver<ServerMessage>,
     rooms: Rooms,
 ) {
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
     loop {
         let response = tokio::select! {
+            _ = heartbeat.tick() => None,
             response = responses.recv() => match response {
-                Some(response) => response,
+                Some(response) => Some(response),
                 None => break,
             },
             changed = snapshots.changed() => {
@@ -334,29 +343,32 @@ async fn write_updates(
                     break;
                 }
 
-                ServerMessage::Snapshot {
+                Some(ServerMessage::Snapshot {
                     snapshot: snapshots.borrow_and_update().clone(),
                     server_ms: rooms.now_ms(),
-                }
+                })
             },
         };
 
         let response = match response {
-            ServerMessage::Snapshot { .. } => ServerMessage::Snapshot {
+            Some(ServerMessage::Snapshot { .. }) => Some(ServerMessage::Snapshot {
                 snapshot: snapshots.borrow_and_update().clone(),
                 server_ms: rooms.now_ms(),
-            },
+            }),
             response => response,
         };
 
-        let Ok(json) = serde_json::to_string(&response) else {
-            break;
+        let message = match response {
+            Some(response) => {
+                let Ok(json) = serde_json::to_string(&response) else {
+                    break;
+                };
+                Message::text(json)
+            }
+            None => Message::Ping(Default::default()),
         };
 
-        if !matches!(
-            timeout(WRITE_TIMEOUT, sink.send(Message::text(json))).await,
-            Ok(Ok(()))
-        ) {
+        if !matches!(timeout(WRITE_TIMEOUT, sink.send(message)).await, Ok(Ok(()))) {
             break;
         }
     }
@@ -497,13 +509,14 @@ mod tests {
                 serde_json::from_str::<ClientMessage>(wire).unwrap(),
                 ClientMessage::Join {
                     host_token: None,
-                    member_token: None
+                    member_token: None,
+                    resume_token: None,
                 }
             ));
         }
         assert!(
             matches!(serde_json::from_str::<ClientMessage>(r#"{"type":"join","member_token":"identity"}"#).unwrap(),
-            ClientMessage::Join { host_token: None, member_token: Some(token) } if token == "identity")
+            ClientMessage::Join { host_token: None, member_token: Some(token), resume_token: None } if token == "identity")
         );
         assert!(
             serde_json::from_str::<ClientMessage>(r#"{"type":"join","member_token":42}"#).is_err()
@@ -518,7 +531,7 @@ mod tests {
         let rooms = Rooms::new();
         let created = rooms.create().unwrap();
         let room = rooms.get(&created.room_id).unwrap();
-        let member = room.join(None, None).await.unwrap();
+        let member = room.join(None, None, None).await.unwrap();
         let snapshot = member.snapshots.borrow().clone();
         let token = member.member_token.clone();
         let server_ms = rooms.now_ms();
@@ -526,13 +539,20 @@ mod tests {
         let welcome = serde_json::to_value(ServerMessage::Welcome {
             member_id: member.id,
             member_token: token.clone(),
+            resume_token: member.resume_token.clone(),
             role: member.role,
             snapshot: snapshot.clone(),
             server_ms,
         })
         .unwrap();
-        assert_eq!(welcome.as_object().unwrap().len(), 6);
+        assert_eq!(welcome.as_object().unwrap().len(), 7);
         assert_eq!(welcome["member_token"], token);
+        assert_eq!(welcome["resume_token"], member.resume_token);
+        assert!(
+            !welcome["snapshot"]
+                .to_string()
+                .contains(&member.resume_token)
+        );
         assert!(!welcome["snapshot"].to_string().contains(&token));
 
         let update = serde_json::to_value(ServerMessage::Snapshot {
@@ -541,6 +561,7 @@ mod tests {
         })
         .unwrap();
         assert!(update.get("member_token").is_none());
+        assert!(update.get("resume_token").is_none());
         assert!(!update.to_string().contains(&token));
     }
 

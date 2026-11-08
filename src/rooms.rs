@@ -1,3 +1,4 @@
+use crate::media::MediaSource;
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
@@ -79,7 +80,7 @@ pub(crate) struct Snapshot {
     pub(crate) room_name: String,
     pub(crate) revision: u64,
     pub(crate) media_revision: u64,
-    pub(crate) video_id: Option<String>,
+    pub(crate) source: Option<MediaSource>,
     pub(crate) playing: bool,
     pub(crate) playback_rate: f64,
     pub(crate) position_secs: f64,
@@ -98,7 +99,7 @@ pub(crate) struct FeedEntry {
     pub(crate) avatar: String,
     pub(crate) kind: FeedKind,
     pub(crate) text: Option<String>,
-    pub(crate) video_id: Option<String>,
+    pub(crate) source: Option<MediaSource>,
     pub(crate) position_secs: Option<f64>,
 }
 
@@ -121,14 +122,14 @@ pub(crate) enum FeedKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SocialAction {
     Message { text: String },
-    ProposeVideo { video_id: String },
+    ProposeVideo { source: MediaSource },
     SetModerator { member_id: u64, enabled: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
-    SetVideo { video_id: String },
+    SetVideo { source: MediaSource },
     Play { position_secs: f64 },
     Pause { position_secs: f64 },
     Seek { position_secs: f64 },
@@ -358,13 +359,6 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.is_ascii()
 }
 
-fn valid_video_id(video_id: &str) -> bool {
-    video_id.len() == 11
-        && video_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
 fn elapsed_ms(origin: Instant) -> u64 {
     Instant::now()
         .saturating_duration_since(origin)
@@ -490,7 +484,7 @@ impl RoomActor {
             room_name: room_name(),
             revision: 0,
             media_revision: 0,
-            video_id: None,
+            source: None,
             playing: false,
             playback_rate: 1.0,
             position_secs: 0.0,
@@ -806,7 +800,7 @@ impl RoomActor {
         if !valid_id(&id) || !action.is_valid() {
             return Err(INVALID_COMMAND);
         }
-        if self.snapshot.video_id.is_none() && !matches!(action, Action::SetVideo { .. }) {
+        if self.snapshot.source.is_none() && !matches!(action, Action::SetVideo { .. }) {
             return Err(INVALID_COMMAND);
         }
 
@@ -852,9 +846,9 @@ impl RoomActor {
             self.record_event(member_id, FeedKind::Seek, None, None, Some(position_secs))?;
         }
         if record_playback_event {
-            let (kind, text, video_id, position_secs) = match &action {
-                Action::SetVideo { video_id } => {
-                    (FeedKind::SetVideo, None, Some(video_id.clone()), Some(0.0))
+            let (kind, text, source, position_secs) = match &action {
+                Action::SetVideo { source } => {
+                    (FeedKind::SetVideo, None, Some(source.clone()), Some(0.0))
                 }
                 Action::Play { position_secs } => {
                     (FeedKind::Play, None, None, Some(*position_secs))
@@ -872,13 +866,13 @@ impl RoomActor {
                     None,
                 ),
             };
-            self.record_event(member_id, kind, text, video_id, position_secs)?;
+            self.record_event(member_id, kind, text, source, position_secs)?;
         }
 
         match &action {
-            Action::SetVideo { video_id } => {
+            Action::SetVideo { source } => {
                 self.snapshot.media_revision = next_revision;
-                self.snapshot.video_id = Some(video_id.clone());
+                self.snapshot.source = Some(source.clone());
                 self.snapshot.playing = false;
                 self.snapshot.playback_rate = 1.0;
                 self.snapshot.position_secs = 0.0;
@@ -950,7 +944,7 @@ impl RoomActor {
                 }
                 *text = trimmed.to_owned();
             }
-            SocialAction::ProposeVideo { video_id } if !valid_video_id(video_id) => {
+            SocialAction::ProposeVideo { source } if !source.is_valid() => {
                 return Err(INVALID_COMMAND);
             }
             _ => {}
@@ -976,10 +970,10 @@ impl RoomActor {
             }
         }
 
-        let (kind, text, video_id) = match &action {
+        let (kind, text, source) = match &action {
             SocialAction::Message { text } => (FeedKind::Message, Some(text.clone()), None),
-            SocialAction::ProposeVideo { video_id } => {
-                (FeedKind::Proposal, None, Some(video_id.clone()))
+            SocialAction::ProposeVideo { source } => {
+                (FeedKind::Proposal, None, Some(source.clone()))
             }
             SocialAction::SetModerator {
                 member_id: target_id,
@@ -994,7 +988,7 @@ impl RoomActor {
                 )
             }
         };
-        let event_id = self.record_event(member_id, kind, text, video_id, None)?;
+        let event_id = self.record_event(member_id, kind, text, source, None)?;
         if let SocialAction::SetModerator {
             member_id: target_id,
             enabled,
@@ -1041,7 +1035,7 @@ impl RoomActor {
         member_id: u64,
         kind: FeedKind,
         text: Option<String>,
-        video_id: Option<String>,
+        source: Option<MediaSource>,
         position_secs: Option<f64>,
     ) -> Result<u64, RoomError> {
         let id = self.next_event_id;
@@ -1055,7 +1049,7 @@ impl RoomActor {
             avatar: member.avatar.clone(),
             kind,
             text,
-            video_id,
+            source,
             position_secs,
         };
 
@@ -1075,7 +1069,7 @@ impl RoomActor {
 impl Action {
     fn is_valid(&self) -> bool {
         match self {
-            Self::SetVideo { video_id } => valid_video_id(video_id),
+            Self::SetVideo { source } => source.is_valid(),
             Self::Play { position_secs }
             | Self::Pause { position_secs }
             | Self::Seek { position_secs } => {
@@ -1114,7 +1108,9 @@ mod tests {
 
     fn video() -> Action {
         Action::SetVideo {
-            video_id: "dQw4w9WgXcQ".into(),
+            source: MediaSource::Youtube {
+                id: "dQw4w9WgXcQ".into(),
+            },
         }
     }
 
@@ -2255,7 +2251,12 @@ mod tests {
         );
         let reloaded = host.snapshots.borrow().clone();
         assert_eq!(reloaded.media_revision, 5);
-        assert_eq!(reloaded.video_id, Some("dQw4w9WgXcQ".into()));
+        assert_eq!(
+            reloaded.source,
+            Some(MediaSource::Youtube {
+                id: "dQw4w9WgXcQ".into()
+            })
+        );
         assert!(!reloaded.playing);
         assert_eq!(reloaded.position_secs, 0.0);
 
@@ -2266,7 +2267,9 @@ mod tests {
         assert_eq!(*host.snapshots.borrow(), reloaded);
 
         let other_video = Action::SetVideo {
-            video_id: "abcdefghijk".into(),
+            source: MediaSource::Youtube {
+                id: "abcdefghijk".into(),
+            },
         };
         assert_eq!(
             room.command(host.id, "stale-load".into(), 4, other_video.clone())
@@ -2284,7 +2287,9 @@ mod tests {
                 "invalid-load".into(),
                 5,
                 Action::SetVideo {
-                    video_id: "invalid".into()
+                    source: MediaSource::Youtube {
+                        id: "invalid".into()
+                    }
                 }
             )
             .await,
@@ -2431,14 +2436,14 @@ mod tests {
                 Err(INVALID_COMMAND)
             );
         }
-        for video_id in ["short", "abcdefghijkl", "dQw4w9WgXc!", "éQw4w9WgXc"] {
+        for source in ["short", "abcdefghijkl", "dQw4w9WgXc!", "éQw4w9WgXc"] {
             assert_eq!(
                 room.command(
                     host.id,
                     "bad".into(),
                     0,
                     Action::SetVideo {
-                        video_id: video_id.into()
+                        source: MediaSource::Youtube { id: source.into() }
                     }
                 )
                 .await,
@@ -2734,7 +2739,7 @@ mod tests {
                 avatar: loaded.participants[0].avatar.clone(),
                 kind: FeedKind::Play,
                 text: None,
-                video_id: None,
+                source: None,
                 position_secs: Some(0.0),
             }]
         );
@@ -2863,7 +2868,7 @@ mod tests {
                     avatar: loaded.participants[0].avatar.clone(),
                     kind,
                     text: None,
-                    video_id: None,
+                    source: None,
                     position_secs: Some(position_secs),
                 })
                 .collect();
@@ -3112,7 +3117,9 @@ mod tests {
                 guest.id,
                 "proposal".into(),
                 SocialAction::ProposeVideo {
-                    video_id: "abcdefghijk".into(),
+                    source: MediaSource::Youtube {
+                        id: "abcdefghijk".into(),
+                    },
                 },
             )
             .await
@@ -3123,7 +3130,7 @@ mod tests {
         assert_eq!(social.media_revision, before.media_revision);
         assert_eq!(social.anchor_ms, before.anchor_ms);
         assert_eq!(social.position_secs, before.position_secs);
-        assert_eq!(social.video_id, before.video_id);
+        assert_eq!(social.source, before.source);
         assert_eq!(social.playing, before.playing);
         assert_eq!(social.room_name, before.room_name);
 
@@ -3132,7 +3139,7 @@ mod tests {
             serde_json::json!({
                 "id": message_id, "at_ms": 5000, "member_id": guest.id,
                 "name": author.name, "avatar": author.avatar, "kind": "message",
-                "text": "hello <script> & friends", "video_id": null, "position_secs": null,
+                "text": "hello <script> & friends", "source": null, "position_secs": null,
             })
         );
         assert_eq!(
@@ -3140,7 +3147,7 @@ mod tests {
             serde_json::json!({
                 "id": proposal_id, "at_ms": 5000, "member_id": guest.id,
                 "name": author.name, "avatar": author.avatar, "kind": "proposal",
-                "text": null, "video_id": "abcdefghijk", "position_secs": null,
+                "text": null, "source":{"type":"youtube","id":"abcdefghijk"}, "position_secs": null,
             })
         );
 
@@ -3246,13 +3253,13 @@ mod tests {
                 Err(INVALID_COMMAND)
             );
         }
-        for video_id in ["short", "abcdefghijkl", "dQw4w9WgXc!", "éQw4w9WgXc"] {
+        for source in ["short", "abcdefghijkl", "dQw4w9WgXc!", "éQw4w9WgXc"] {
             assert_eq!(
                 room.social(
                     guest.id,
                     "bad".into(),
                     SocialAction::ProposeVideo {
-                        video_id: video_id.into(),
+                        source: MediaSource::Youtube { id: source.into() },
                     }
                 )
                 .await,
@@ -3493,8 +3500,10 @@ mod tests {
 
     #[test]
     fn wire_types_have_exact_protocol_shapes() {
-        let action: Action =
-            serde_json::from_str(r#"{"type":"set_video","video_id":"dQw4w9WgXcQ"}"#).unwrap();
+        let action: Action = serde_json::from_str(
+            r#"{"type":"set_video","source":{"type":"youtube","id":"dQw4w9WgXcQ"}}"#,
+        )
+        .unwrap();
         assert_eq!(action, video());
 
         let rate: Action =
@@ -3537,7 +3546,7 @@ mod tests {
             room_name: "The Sleepy Observatory".into(),
             revision: 0,
             media_revision: 0,
-            video_id: None,
+            source: None,
             playing: false,
             playback_rate: 1.0,
             position_secs: 0.0,
@@ -3554,7 +3563,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(snapshot).unwrap(),
             serde_json::json!({
-                "incarnation": "random", "room_name": "The Sleepy Observatory", "revision": 0, "media_revision": 0, "video_id": null,
+                "incarnation": "random", "room_name": "The Sleepy Observatory", "revision": 0, "media_revision": 0, "source": null,
                 "playing": false, "playback_rate": 1.0, "position_secs": 0.0, "anchor_ms": 0, "members": 1,
                 "participants": [{ "id": 1, "name": "Sleepy Waffle", "role": "guest", "avatar": "0123456789abcdef" }],
                 "events": [],

@@ -136,6 +136,15 @@ session storage. Check desktop and a narrow mobile viewport.
     activity. A separate tab with only the shared identity stays a Companion.
     After a confirmed departure exceeds 60 seconds, resumption must not restore
     the expired grant.
+13. Load direct MP4 and WebM links in two sessions. Check native play/pause,
+    seeking and speed changes as Keeper and Co-keeper, including while paused.
+    Companion controls must stay local until Rejoin playback. Changing sources
+    resets to paused at 1×. Check late joins, reconnects, delayed metadata and
+    switching between direct video and YouTube without stale control events.
+    A direct-only room must not request the YouTube API.
+14. Suggest a direct link through chat, then load it as Keeper. Check a signed
+    query URL, unsupported codecs, unreachable links and mixed-content failures.
+    Errors must stay local and offer Retry; the server must not fetch the URL.
 
 Watch the console for application exceptions. The YouTube widget can emit
 its own initialization warnings; distinguish those from application failures.

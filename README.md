@@ -1,6 +1,6 @@
 # sameframe
 
-Watch YouTube together. Built with [Topcoat](https://github.com/tokio-rs/topcoat).
+Watch videos together. Built with [Topcoat](https://github.com/tokio-rs/topcoat).
 
 ## Run
 
@@ -19,6 +19,20 @@ sameframe --public
 ```
 
 Use HTTPS for public hosting. Rooms disappear when the server restarts.
+
+## Videos
+
+Paste a YouTube link or a direct `.mp4`, `.webm`, `.ogv`, `.ogg`, `.m4v`, or `.mov`
+HTTP(S) URL. Direct videos load in each viewer's browser, not through the server;
+the link must be reachable by everyone and its codecs supported by their browser.
+The media host should support byte-range requests for seeking.
+Use HTTPS media on an HTTPS site. Links requiring a website login, arbitrary
+webpages, HLS/DASH playlists and DRM players are not supported.
+
+Use the player's native controls. Keeper and Co-keeper play, pause, seek and speed
+changes apply to the room on both providers. Companion changes stay local until
+Rejoin playback. Direct links can also be suggested through chat. Signed URL
+query parameters are shared with the room; do not paste personal credentials.
 
 ## Develop
 

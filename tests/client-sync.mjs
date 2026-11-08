@@ -4,18 +4,37 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../assets/sync.js', import.meta.url), 'utf8');
 const {
-  parseVideoId, parseRoomLink, validSnapshot, SnapshotOrder, ClockFilter,
+  parseVideoId, parseMediaSource, validSource, sourceKey, parseRoomLink, validSnapshot, SnapshotOrder, ClockFilter,
   targetPosition, shouldSeek, reconnectDelay, visibleProblem, playbackUpdate, NativePlaybackObserver, supportedRate, avatarPattern,
 } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const youtube = (id) => ({ type: 'youtube', id });
 
 const state = (overrides = {}) => {
-  const snapshot = { incarnation: 'process-a', room_name: 'The Sleepy Observatory', events: [], revision: 3, media_revision: 0, playback_rate: 1, video_id: 'dQw4w9WgXcQ',
+  const snapshot = { incarnation: 'process-a', room_name: 'The Sleepy Observatory', events: [], revision: 3, media_revision: 0, playback_rate: 1, source: youtube('dQw4w9WgXcQ'),
     playing: true, position_secs: 20, anchor_ms: 10000, members: 2, ...overrides };
   snapshot.participants ??= Array.from({ length: Math.max(0, Math.min(32, snapshot.members)) }, (_, index) => ({
     id: index + 1, name: `Sleepy Goose ${index}`, role: index ? 'guest' : 'host', avatar: (index + 1).toString(16).padStart(16, '0'),
   }));
   return snapshot;
 };
+
+test('media validation agrees with the server corpus and input parsing produces canonical sources', async () => {
+  const cases = JSON.parse(await readFile(new URL('./media-sources.json', import.meta.url), 'utf8'));
+  for (const { source, valid } of cases) assert.equal(validSource(source), valid, JSON.stringify(source));
+  assert.equal(validSource({ type: 'direct', url: `https://example.org/a.mp4?${'a'.repeat(2048)}` }), false);
+  assert.deepEqual(parseMediaSource(' https://EXAMPLE.org:443/a/../video.mp4?key=a%2Fb '),
+    { type: 'direct', url: 'https://example.org/video.mp4?key=a%2Fb' });
+  assert.deepEqual(parseMediaSource('https://youtu.be/dQw4w9WgXcQ'), youtube('dQw4w9WgXcQ'));
+  for (const input of ['https://example.org/watch', 'file:///a.mp4', 'https://user:pass@example.org/a.mp4', 'https://example.org/a.mp4#t=20']) {
+    assert.equal(parseMediaSource(input), null);
+  }
+  const source = { type: 'direct', url: 'https://example.org/a.webm' };
+  const previous = state({ source });
+  assert.equal(validSnapshot(previous), true);
+  assert.equal(playbackUpdate(previous, state({ source: { ...source } })).resetVideo, false);
+  assert.equal(playbackUpdate(previous, state({ source: youtube('dQw4w9WgXcQ') })).resetVideo, true);
+  assert.equal(sourceKey(source), source.url);
+});
 
 test('avatars are deterministic, symmetric, non-empty, and use the Mocha palette', () => {
   const seed = '89abcdef01234567';
@@ -48,13 +67,13 @@ test('participant snapshots reject duplicate identities, malformed avatars and i
 
 test('room names, participant names, moderator roles and retained event payloads validate before rendering', () => {
   const entry = { id: 1, at_ms: 1000, member_id: 2, name: 'Cosmic Goose', avatar: '0123456789abcdef',
-    kind: 'proposal', text: null, video_id: 'dQw4w9WgXcQ', position_secs: null };
+    kind: 'proposal', text: null, source: youtube('dQw4w9WgXcQ'), position_secs: null };
   const snapshot = state({ events: [entry] });
   snapshot.participants[1].role = 'moderator';
   assert.equal(validSnapshot(snapshot), true);
 
   for (const overrides of [{ room_name: '' }, { events: undefined }, { events: [entry, entry] },
-    { events: [{ ...entry, video_id: 'javascript:alert(1)' }] }, { events: [{ ...entry, kind: 'unknown' }] },
+    { events: [{ ...entry, source: youtube('javascript:alert(1)') }] }, { events: [{ ...entry, kind: 'unknown' }] },
     { events: [{ ...entry, at_ms: NaN }] }, { events: [{ ...entry, kind: 'message', text: null }] },
     { events: [{ ...entry, name: '' }] }, { events: Array(101).fill(entry) }]) {
     assert.equal(validSnapshot({ ...snapshot, ...overrides }), false);
@@ -105,12 +124,12 @@ test('room joining stays same-origin and discards secrets and queries', () => {
 
 test('snapshot boundary validates all fields before affecting state', () => {
   assert.equal(validSnapshot(state()), true);
-  assert.equal(validSnapshot(state({ video_id: null, playing: false })), true);
+  assert.equal(validSnapshot(state({ source: null, playing: false })), true);
   for (const invalid of [null, {}, state({ revision: -1 }), state({ revision: 1.5 }),
     state({ revision: Number.MAX_SAFE_INTEGER + 1 }), state({ incarnation: '' }),
     state({ media_revision: -1 }), state({ media_revision: 4 }), state({ media_revision: undefined }),
     state({ playback_rate: 0 }), state({ playback_rate: NaN }), state({ playback_rate: 4.1 }),
-    state({ video_id: 'bad' }), state({ playing: 1 }), state({ position_secs: NaN }),
+    state({ source: youtube('bad') }), state({ playing: 1 }), state({ position_secs: NaN }),
     state({ position_secs: -1 }), state({ anchor_ms: Infinity }), state({ members: -1 })]) {
     assert.equal(validSnapshot(invalid), false);
   }
@@ -372,5 +391,5 @@ test('only a changed media revision resets the same ID, not native pause or seek
   assert.equal(playbackUpdate(previous, state({ revision: 4, media_revision: 4, playing: false, position_secs: 0 })).resetVideo, true);
   assert.equal(playbackUpdate(previous, state({ revision: 4, playing: false, position_secs: 0 })).resetVideo, false);
   assert.equal(playbackUpdate(previous, state({ playing: false, position_secs: 0, members: 3 })).resetVideo, false);
-  assert.equal(playbackUpdate(previous, state({ video_id: 'abcdefghijk' })).resetVideo, true);
+  assert.equal(playbackUpdate(previous, state({ source: youtube('abcdefghijk') })).resetVideo, true);
 });

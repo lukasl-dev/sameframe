@@ -80,7 +80,7 @@ A matching host token grants host control; omission grants guest access. An
 invalid token is rejected, not silently downgraded. Server sends:
 
 ```json
-{"type":"welcome","member_id":1,"role":"guest","snapshot":{"incarnation":"random","room_name":"The Sleepy Observatory","revision":0,"media_revision":0,"video_id":null,"playing":false,"playback_rate":1.0,"position_secs":0.0,"anchor_ms":0,"members":1,"participants":[{"id":1,"name":"Sleepy Waffle","role":"guest","avatar":"0123456789abcdef"}],"events":[{"id":1,"at_ms":0,"member_id":1,"name":"Sleepy Waffle","avatar":"0123456789abcdef","kind":"joined","text":null,"video_id":null,"position_secs":null}]},"server_ms":0}
+{"type":"welcome","member_id":1,"role":"guest","snapshot":{"incarnation":"random","room_name":"The Sleepy Observatory","revision":0,"media_revision":0,"source":null,"playing":false,"playback_rate":1.0,"position_secs":0.0,"anchor_ms":0,"members":1,"participants":[{"id":1,"name":"Sleepy Waffle","role":"guest","avatar":"0123456789abcdef"}],"events":[{"id":1,"at_ms":0,"member_id":1,"name":"Sleepy Waffle","avatar":"0123456789abcdef","kind":"joined","text":null,"source":null,"position_secs":null}]},"server_ms":0}
 ```
 
 The welcome also carries `member_token`, a private server-signed room identity.
@@ -128,12 +128,20 @@ changes. The server also pushes complete state whenever room state changes:
 Host/moderator commands include an idempotency ID and expected playback revision:
 
 ```json
-{"type":"command","id":"random-command-id","revision":0,"action":{"type":"set_video","video_id":"dQw4w9WgXcQ"}}
+{"type":"command","id":"random-command-id","revision":0,"action":{"type":"set_video","source":{"type":"youtube","id":"dQw4w9WgXcQ"}}}
 {"type":"command","id":"random-command-id","revision":1,"action":{"type":"play","position_secs":0.0}}
 {"type":"command","id":"random-command-id","revision":2,"action":{"type":"pause","position_secs":12.5}}
 {"type":"command","id":"random-command-id","revision":3,"action":{"type":"seek","position_secs":42.0}}
 {"type":"command","id":"random-command-id","revision":4,"action":{"type":"set_rate","playback_rate":1.5}}
 ```
+
+The `source` is either `{"type":"youtube","id":"dQw4w9WgXcQ"}` or
+`{"type":"direct","url":"https://example.org/video.webm"}`. YouTube IDs are
+11 ASCII alphanumeric, `_`, or `-` characters. Direct URLs must be canonical,
+ASCII HTTP(S), at most 2048 bytes, with no credentials or fragment, and a path
+ending in `.mp4`, `.webm`, `.ogv`, `.ogg`, `.m4v`, or `.mov` (case-insensitive).
+Query parameters are retained. Unknown source fields/types are rejected. The
+browser normalizes pasted URLs; the server never fetches or probes them.
 
 Set-video resets to paused at zero and sets `media_revision` to its accepted
 playback revision. This identifies a reload even when the video ID is unchanged;
@@ -141,7 +149,11 @@ pausing or seeking to zero is not a reload. Loading also resets playback rate to
 1x. Seek preserves playing/paused status. Set-rate re-anchors the current
 position at the old rate before applying the new rate; it preserves playing or
 paused status. Rates must be finite and between 0.25x and 4x, and the browser uses
-only rates available from its player.
+only rates available from its player. Keeper/Co-keeper native rate changes use
+`set_rate` for both providers; Companion changes stay local. Native HTML video
+accepts continuous rates within the protocol bounds. A YouTube video that cannot
+use the room rate falls back locally with an explicit notice, without changing
+the room's rate.
 Accepted playback commands increment revision; membership, role changes, messages,
 and proposals do not increment `revision` or `media_revision`, nor alter the
 playback anchor/position/rate. Already-applied command IDs are acknowledged without
@@ -174,7 +186,7 @@ role from `snapshot.participants` using `member_id`.
 
 ```json
 {"type":"social","id":"chat-1","action":{"type":"message","text":"Hello room!"}}
-{"type":"social","id":"proposal-1","action":{"type":"propose_video","video_id":"dQw4w9WgXcQ"}}
+{"type":"social","id":"proposal-1","action":{"type":"propose_video","source":{"type":"youtube","id":"dQw4w9WgXcQ"}}}
 {"type":"social","id":"grant-1","action":{"type":"set_moderator","member_id":2,"enabled":true}}
 {"type":"social","id":"revoke-1","action":{"type":"set_moderator","member_id":2,"enabled":false}}
 {"type":"social_ack","id":"chat-1","event_id":3}
@@ -182,8 +194,7 @@ role from `snapshot.participants` using `member_id`.
 ```
 
 Messages are trimmed, nonempty, at most 500 Unicode scalar values and 2000 UTF-8
-bytes after trimming. Video IDs use the same 11-character ASCII alphanumeric,
-`_`, `-` validation as playback loads. IDs are nonempty ASCII strings of at most
+bytes after trimming. Sources use the same validation as playback loads. IDs are nonempty ASCII strings of at most
 64 bytes. Unknown fields are rejected, including nested action fields.
 Social retry IDs have a separate 256-accepted-command window **per membership**;
 playback retains its own bounded 256-command window. Retries consume the member's
@@ -196,7 +207,7 @@ retry is still acknowledged after its target departs, without applying it again.
 Every snapshot retains the newest 100 `events`, oldest first, until room expiry:
 
 ```json
-{"id":3,"at_ms":150,"member_id":2,"name":"Cosmic Waffle","avatar":"abcdef0123456789","kind":"message","text":"Hello room!","video_id":null,"position_secs":null}
+{"id":3,"at_ms":150,"member_id":2,"name":"Cosmic Waffle","avatar":"abcdef0123456789","kind":"message","text":"Hello room!","source":null,"position_secs":null}
 ```
 
 These are the **exact nine fields**, with unused optional fields serialized as
@@ -206,7 +217,7 @@ Kinds are `joined`, `left`, `message`, `proposal`, `set_video`, `play`, `pause`,
 `seek`, `set_rate`, and `role_changed`. Authors' names/avatar seeds are copied
 into entries, so departure does not erase their identity. Role entries are
 attributed to the host, with target name/new role in `text`; rate entries use
-`text` such as `1.5x`. Proposals/loads include `video_id`; loads include position
+`text` such as `1.5x`. Proposals/loads include `source`; loads include position
 zero, play/pause/seek include their accepted position. Membership and role events
 have no playback position payload. Initial joins are logged once. Disconnection
 removes the active participant immediately, but `left` activity waits 60 seconds.

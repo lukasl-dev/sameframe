@@ -2,6 +2,7 @@ mod access;
 mod api;
 mod cli;
 mod components;
+mod media;
 mod pages;
 mod rooms;
 

@@ -4,16 +4,20 @@ import { readFile } from 'node:fs/promises';
 
 const helperSource = await readFile(new URL('../assets/sync.js', import.meta.url), 'utf8');
 const sync = await import(`data:text/javascript;base64,${Buffer.from(helperSource).toString('base64')}`);
+const playersSource = await readFile(new URL('../assets/players.js', import.meta.url), 'utf8');
+const playerHelpers = await import(`data:text/javascript;base64,${Buffer.from(playersSource).toString('base64')}`);
 const roomSource = (await readFile(new URL('../assets/room.js', import.meta.url), 'utf8'))
-  .replace('import(document.body.dataset.syncUrl)', 'Promise.resolve(sync)');
+  .replace('import(document.body.dataset.syncUrl)', 'Promise.resolve(sync)')
+  .replace('import(document.body.dataset.playersUrl)', 'Promise.resolve(playerHelpers)');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const id = 'dQw4w9WgXcQ';
 const memberToken = 'a'.repeat(96);
 const resumeToken = 'b'.repeat(64);
+const youtube = (id) => ({ type: 'youtube', id });
 
 const initial = (overrides = {}) => {
   const snapshot = { incarnation: 'a', room_name: 'The Sleepy Observatory', events: [], revision: 0, media_revision: 0, playback_rate: 1,
-    video_id: null, playing: false, position_secs: 0, anchor_ms: 1000, members: 1, ...overrides };
+    source: null, playing: false, position_secs: 0, anchor_ms: 1000, members: 1, ...overrides };
   snapshot.participants ??= Array.from({ length: Math.max(0, Math.min(32, snapshot.members)) }, (_, index) => ({
     id: index + 1, name: index ? `Cosmic Goose ${index}` : 'Sleepy Waffle', role: index ? 'guest' : 'host', avatar: (index + 1).toString(16).padStart(16, '0'),
   }));
@@ -217,12 +221,19 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
   };
 
   const globals = { YT: api ? YT : undefined, crypto: { randomUUID: () => `command-${++commandId}` } };
+  const providers = { ...playerHelpers, directPlayer(mount, source, events) {
+    const model = new YT.Player(mount.id, { events });
+    get(mount.id).tagName = 'VIDEO';
+    const adapter = playerHelpers.youtubePlayer(model);
+    return { ...adapter, getAvailablePlaybackRates: requested => [requested],
+      load(source, position, playing) { adapter.load({ id: source.url }, position, playing); } };
+  } };
   const setTimeout = (fn, ms) => { const key = ++timerId; timers.set(key, { fn, ms }); return key; };
   const clearTimeout = (key) => timers.delete(key);
   const source = importFailure ? roomSource.replace('Promise.resolve(sync)', 'Promise.reject(new Error("missing"))') : roomSource;
-  await new AsyncFunction('sync', 'document', 'window', 'location', 'history', 'sessionStorage', 'localStorage', 'performance',
+  await new AsyncFunction('sync', 'playerHelpers', 'document', 'window', 'location', 'history', 'sessionStorage', 'localStorage', 'performance',
     'WebSocket', 'YT', 'globalThis', 'setTimeout', 'clearTimeout', 'setInterval', 'navigator', 'console', source)(
-    sync, document, { addEventListener(event, fn) { windowEvents.set(event, fn); } },
+    sync, providers, document, { addEventListener(event, fn) { windowEvents.set(event, fn); } },
     { origin: 'https://sameframe.test', host: 'sameframe.test', protocol: 'https:', pathname, search: query, hash: token ? `#host=${token}` : '' },
     { replaceState(...args) { historyCalls.push(args); } },
     { getItem(key) { if (storageBlocked) throw Error('blocked'); return stored.get(key) ?? null; },
@@ -268,7 +279,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
     const revision = command.revision + 1;
     const action = command.action;
     const snapshot = { ...ws.latestSnapshot, revision, anchor_ms: now };
-    if (action.type === 'set_video') Object.assign(snapshot, { video_id: action.video_id, media_revision: revision, playing: false, position_secs: 0, playback_rate: 1 });
+    if (action.type === 'set_video') Object.assign(snapshot, { source: action.source, media_revision: revision, playing: false, position_secs: 0, playback_rate: 1 });
     else if (action.type === 'set_rate') Object.assign(snapshot, { position_secs: sync.targetPosition(ws.latestSnapshot, now), playback_rate: action.playback_rate });
     else Object.assign(snapshot, { playing: action.type === 'play', position_secs: action.position_secs });
     Object.assign(snapshot, overrides);
@@ -295,7 +306,7 @@ async function browser({ token = null, api = true, storageBlocked = false, impor
 const commands = (ws) => ws.sent.filter((message) => message.type === 'command');
 const socialCommands = (ws) => ws.sent.filter((message) => message.type === 'social');
 const event = (id, kind, overrides = {}) => ({ id, kind, at_ms: 1000, member_id: 1,
-  name: 'Sleepy Waffle', avatar: '0123456789abcdef', text: null, video_id: null, position_secs: null, ...overrides });
+  name: 'Sleepy Waffle', avatar: '0123456789abcdef', text: null, source: null, position_secs: null, ...overrides });
 const escape = (b, overrides = {}) => {
   const event = { key: 'Escape', preventDefault() { this.defaultPrevented = true; }, ...overrides };
   b.documentEvents.get('keydown')(event);
@@ -304,7 +315,7 @@ const escape = (b, overrides = {}) => {
 
 test('theater mode toggles without changing playback and Escape restores focus', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const player = b.ready();
   const writes = [player.videos.length, player.plays, player.pauses, player.seeks.length];
 
@@ -383,17 +394,17 @@ test('narrow theater video control reuses the form, preserves drafts, and keeps 
     b.click('video-toggle');
     b.submit('video-form');
     assert.equal(video.dataset.open, 'true');
-    assert.match(b.get('room-error').textContent, /valid YouTube/);
+    assert.match(b.get('room-error').textContent, /YouTube link or a direct video/);
     assert.equal(commands(ws).length + socialCommands(ws).length, 0);
     b.get('video-url').value = `https://youtu.be/${id}`;
     b.submit('video-form');
     assert.equal(video.dataset.open, 'false');
     assert.equal(b.document.activeElement, b.get('video-toggle'));
     if (role === 'guest') {
-      assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', video_id: id });
+      assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', source: youtube(id) });
       assert.equal(commands(ws).length, 0);
     } else {
-      assert.deepEqual(commands(ws)[0].action, { type: 'set_video', video_id: id });
+      assert.deepEqual(commands(ws)[0].action, { type: 'set_video', source: youtube(id) });
       assert.equal(socialCommands(ws).length, 0);
     }
     b.click('theater-toggle');
@@ -608,14 +619,14 @@ test('malformed identity storage and welcome tokens cannot become room credentia
 test('same-room reconnect applies a paused snapshot without echoing delayed corrections as Play or Pause', async () => {
   for (const role of ['host', 'guest']) {
     const b = await browser();
-    const old = await b.welcome(initial({ video_id: id, playing: true }), role);
+    const old = await b.welcome(initial({ source: youtube(id), playing: true }), role);
     const p = b.ready();
 
     b.document.hidden = true;
     b.documentEvents.get('visibilitychange')();
     old.close();
     b.click('reconnect-button');
-    const paused = initial({ video_id: id, playing: false, position_secs: 60, revision: 1 });
+    const paused = initial({ source: youtube(id), playing: false, position_secs: 60, revision: 1 });
     const ws = await b.welcome(paused, role);
     b.document.hidden = false;
     b.documentEvents.get('visibilitychange')();
@@ -647,7 +658,7 @@ test('same-room reconnect applies a paused snapshot without echoing delayed corr
 test('cached offline rate changes are corrected on reconnect instead of changing or detaching from the room', async () => {
   for (const role of ['host', 'guest']) {
     const b = await browser();
-    const old = await b.welcome(initial({ video_id: id }), role);
+    const old = await b.welcome(initial({ source: youtube(id) }), role);
     const p = b.ready();
 
     b.document.hidden = true;
@@ -656,7 +667,7 @@ test('cached offline rate changes are corrected on reconnect instead of changing
     p.rate = 2;
     p.time = 40;
     b.click('reconnect-button');
-    const fresh = initial({ video_id: id, position_secs: 10, playback_rate: 1 });
+    const fresh = initial({ source: youtube(id), position_secs: 10, playback_rate: 1 });
     const ws = await b.welcome(fresh, role);
     b.document.hidden = false;
     b.documentEvents.get('visibilitychange')();
@@ -681,7 +692,7 @@ test('cached offline rate changes are corrected on reconnect instead of changing
 
 test('reconnecting to the same playing video reloads lost iframe media atomically', async () => {
   const b = await browser();
-  const old = await b.welcome(initial({ video_id: id, playing: true }));
+  const old = await b.welcome(initial({ source: youtube(id), playing: true }));
   const p = b.ready();
   const loads = p.loads.length;
 
@@ -689,7 +700,7 @@ test('reconnecting to the same playing video reloads lost iframe media atomicall
   p.videoId = '';
   p.state = -1;
   b.click('reconnect-button');
-  const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 30 }));
+  const ws = await b.welcome(initial({ source: youtube(id), playing: true, position_secs: 30 }));
   assert.equal(p.loads.length, loads + 1);
   assert.equal(p.seeks.length, 0);
   p.deliver();
@@ -704,7 +715,7 @@ test('reconnecting to the same playing video reloads lost iframe media atomicall
 
 test('visibility recovery without disconnect also waits for fresh state and ignores old cached playback', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id, playing: true }));
+  const ws = await b.welcome(initial({ source: youtube(id), playing: true }));
   const p = b.ready();
 
   b.document.hidden = true;
@@ -715,7 +726,7 @@ test('visibility recovery without disconnect also waits for fresh state and igno
   b.frame(300, false);
   assert.deepEqual(commands(ws), []);
 
-  b.state(ws, initial({ video_id: id, playing: false, position_secs: 20, revision: 1 }));
+  b.state(ws, initial({ source: youtube(id), playing: false, position_secs: 20, revision: 1 }));
   b.frame(300, false);
   b.frame(300, false);
   p.deliver();
@@ -744,14 +755,14 @@ test('returning to a closed socket reconnects immediately instead of waiting on 
 
 test('temporary unavailable media metadata does not reload an otherwise retained iframe on reconnect', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
   const cues = p.cues.length;
   p.getVideoData = () => undefined;
 
   ws.close();
   b.click('reconnect-button');
-  const resumed = await b.welcome(initial({ video_id: id }));
+  const resumed = await b.welcome(initial({ source: youtube(id) }));
   b.frame(300, false);
   assert.equal(p.cues.length, cues);
   assert.deepEqual(commands(resumed), []);
@@ -764,7 +775,7 @@ test('temporary unavailable media metadata does not reload an otherwise retained
 
 test('visibility recovery preserves intentional local watching for a detached Companion', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id, playing: true }), 'guest');
+  const ws = await b.welcome(initial({ source: youtube(id), playing: true }), 'guest');
   const p = b.ready();
   p.userState(2);
   b.frame(300, false);
@@ -773,7 +784,7 @@ test('visibility recovery preserves intentional local watching for a detached Co
   b.document.hidden = true;
   b.document.hidden = false;
   b.documentEvents.get('visibilitychange')();
-  b.state(ws, initial({ video_id: id, playing: true, position_secs: 20 }));
+  b.state(ws, initial({ source: youtube(id), playing: true, position_secs: 20 }));
   b.frame(300, false);
   assert.equal(p.state, 2);
   assert.equal(b.get('join-playback').hidden, false);
@@ -793,7 +804,7 @@ test('visibility before selecting a video does not suppress the first native Pla
     b.documentEvents.get('visibilitychange')();
     b.state(ws, initial());
 
-    b.state(ws, initial({ video_id: id, revision: 1, media_revision: 1 }));
+    b.state(ws, initial({ source: youtube(id), revision: 1, media_revision: 1 }));
     await b.flush();
     const p = b.players[0];
     p.ready();
@@ -813,7 +824,7 @@ test('visibility before selecting a video does not suppress the first native Pla
 test('unavailable metadata is rechecked and later-confirmed lost media reloads without empty-video Play', async () => {
   for (const playing of [false, true]) {
     const b = await browser();
-    const ws = await b.welcome(initial({ video_id: id, playing }));
+    const ws = await b.welcome(initial({ source: youtube(id), playing }));
     const p = b.ready();
     const videos = p.videos.length;
     p.videoId = '';
@@ -822,7 +833,7 @@ test('unavailable metadata is rechecked and later-confirmed lost media reloads w
 
     ws.close();
     b.click('reconnect-button');
-    const resumed = await b.welcome(initial({ video_id: id, playing, position_secs: 30 }));
+    const resumed = await b.welcome(initial({ source: youtube(id), playing, position_secs: 30 }));
     b.frame(300, false);
     assert.equal(p.videos.length, videos);
     assert.equal(p.messages.length, 0);
@@ -845,11 +856,11 @@ test('native autoplay-unlock Play during recovery rejoins locally instead of lea
   for (const role of ['host', 'guest']) {
     for (const delayedCache of [false, true]) {
       const b = await browser();
-      const old = await b.welcome(initial({ video_id: id, playing: true }), role);
+      const old = await b.welcome(initial({ source: youtube(id), playing: true }), role);
       const p = b.ready();
       old.close();
       b.click('reconnect-button');
-      const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 20 }), role);
+      const ws = await b.welcome(initial({ source: youtube(id), playing: true, position_secs: 20 }), role);
       p.messages = [];
       p.time = 20;
       p.state = 2;
@@ -877,7 +888,7 @@ test('Companions suggest videos without playback commands and chat drafts clear 
   b.get('video-url').value = `https://youtu.be/${id}`;
   b.submit('video-form');
   const proposal = socialCommands(ws)[0];
-  assert.deepEqual(proposal.action, { type: 'propose_video', video_id: id });
+  assert.deepEqual(proposal.action, { type: 'propose_video', source: youtube(id) });
   assert.equal(commands(ws).length, 0);
 
   ws.receive({ type: 'social_ack', id: 'other', event_id: 1 });
@@ -895,18 +906,19 @@ test('Companions suggest videos without playback commands and chat drafts clear 
   assert.equal(b.get('send-message').disabled, false);
 });
 
-test('chat YouTube links become proposals and disconnects preserve unsent text', async () => {
-  const b = await browser();
-  const ws = await b.welcome();
-
-  b.get('chat-message').value = `https://youtu.be/${id}`;
-  b.submit('chat-form');
-  assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', video_id: id });
-
-  ws.close();
-  assert.equal(b.get('chat-message').value, `https://youtu.be/${id}`);
-  assert.equal(b.get('send-message').disabled, true);
-  assert.equal(commands(ws).length, 0);
+test('chat media links become proposals and disconnects preserve unsent text', async () => {
+  for (const [link, source] of [[`https://youtu.be/${id}`, youtube(id)],
+    ['https://example.org/video.mp4?signature=a%2Fb', { type: 'direct', url: 'https://example.org/video.mp4?signature=a%2Fb' }]]) {
+    const b = await browser();
+    const ws = await b.welcome();
+    b.get('chat-message').value = link;
+    b.submit('chat-form');
+    assert.deepEqual(socialCommands(ws)[0].action, { type: 'propose_video', source });
+    ws.close();
+    assert.equal(b.get('chat-message').value, link);
+    assert.equal(b.get('send-message').disabled, true);
+    assert.equal(commands(ws).length, 0);
+  }
 });
 
 test('retained feed is appended once on same-revision snapshots and changes only on a new room incarnation', async () => {
@@ -953,29 +965,34 @@ test('new activity does not scroll someone reading history; unread control retur
 });
 
 test('same-revision grants enable Co-keeper proposal approval and revocation discards pending playback', async () => {
-  const b = await browser();
-  const entries = [event(1, 'proposal', { video_id: id })];
-  const ws = await b.welcome(initial({ events: entries }), 'guest');
-  const proposal = b.get('chat-feed').children[0].proposal;
-  assert.equal(proposal.button.hidden, true);
+  for (const source of [youtube(id), { type: 'direct', url: `https://example.org/${'a'.repeat(100)}.webm?signature=a%2Fb` }]) {
+    const b = await browser();
+    const entries = [event(1, 'proposal', { source })];
+    const ws = await b.welcome(initial({ events: entries }), 'guest');
+    const proposal = b.get('chat-feed').children[0].proposal;
+    const link = b.get('chat-feed').children[0].children[1].children[1].children[1];
+    assert.equal(link.href, source.type === 'youtube' ? `https://www.youtube.com/watch?v=${id}` : source.url);
+    assert.ok(link.textContent.length <= 72);
+    assert.equal(proposal.button.hidden, true);
 
-  ws.testRole = 'moderator';
-  b.state(ws, initial({ events: entries }));
-  assert.equal(b.get('role-label').textContent, 'You’re a Co-keeper');
-  assert.equal(b.get('load-video').textContent, 'Watch');
-  assert.equal(proposal.button.hidden, false);
+    ws.testRole = 'moderator';
+    b.state(ws, initial({ events: entries }));
+    assert.equal(b.get('role-label').textContent, 'You’re a Co-keeper');
+    assert.equal(b.get('load-video').textContent, 'Watch');
+    assert.equal(proposal.button.hidden, false);
 
-  proposal.button.events.click();
-  assert.deepEqual(commands(ws)[0].action, { type: 'set_video', video_id: id });
-  assert.equal(proposal.button.disabled, true);
+    proposal.button.events.click();
+    assert.deepEqual(commands(ws)[0].action, { type: 'set_video', source });
+    assert.equal(proposal.button.disabled, true);
 
-  ws.testRole = 'guest';
-  b.state(ws, initial({ events: entries }));
-  assert.equal(b.get('load-video').textContent, 'Suggest');
-  assert.equal(proposal.button.hidden, true);
-  assert.equal(b.get('video-url').disabled, false);
-  ws.receive({ type: 'ack', id: commands(ws)[0].id, revision: 1 });
-  assert.equal(commands(ws).length, 1);
+    ws.testRole = 'guest';
+    b.state(ws, initial({ events: entries }));
+    assert.equal(b.get('load-video').textContent, 'Suggest');
+    assert.equal(proposal.button.hidden, true);
+    assert.equal(b.get('video-url').disabled, false);
+    ws.receive({ type: 'ack', id: commands(ws)[0].id, revision: 1 });
+    assert.equal(commands(ws).length, 1);
+  }
 });
 
 test('Keepers grant roles through independent social actions; Co-keepers do not get role controls', async () => {
@@ -994,7 +1011,7 @@ test('Keepers grant roles through independent social actions; Co-keepers do not 
 
 test('native Co-keeper controls share playback; buffering never produces a banner', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }), 'moderator');
+  const ws = await b.welcome(initial({ source: youtube(id) }), 'moderator');
   const p = b.ready();
 
   p.userState(3);
@@ -1125,7 +1142,7 @@ test('native controls enabled; selected video initially paused; no duplicate han
 
 test('native host play and stable pause issue revisioned commands despite asynchronous state getters', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userState(1, true);
@@ -1146,7 +1163,7 @@ test('native host play and stable pause issue revisioned commands despite asynch
 
 test('native paused seek and playing scrub are observed before room drift correction', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.time = 30;
@@ -1173,11 +1190,11 @@ test('native paused seek and playing scrub are observed before room drift correc
 
 test('programmatic cue, seek, pause, play and delayed cached state updates never echo', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id, position_secs: 10 }));
+  const ws = await b.welcome(initial({ source: youtube(id), position_secs: 10 }));
   const p = b.ready();
   assert.equal(commands(ws).length, 0);
 
-  b.state(ws, initial({ revision: 1, video_id: id, playing: true, position_secs: 40, anchor_ms: 1600 }));
+  b.state(ws, initial({ revision: 1, source: youtube(id), playing: true, position_secs: 40, anchor_ms: 1600 }));
   assert.equal(p.time, 10, 'programmatic seek getter still old');
   b.frame(300, false);
   p.deliver();
@@ -1185,7 +1202,7 @@ test('programmatic cue, seek, pause, play and delayed cached state updates never
   b.frame();
   assert.equal(commands(ws).length, 0);
 
-  b.state(ws, initial({ revision: 2, video_id: id, position_secs: 20 }));
+  b.state(ws, initial({ revision: 2, source: youtube(id), position_secs: 20 }));
   p.deliver();
   b.frame();
   b.frame();
@@ -1195,7 +1212,7 @@ test('programmatic cue, seek, pause, play and delayed cached state updates never
 
 test('one command plus one latest intention coalesces rapid scrub/play/pause without older ack rollback', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userState(1);
@@ -1221,7 +1238,7 @@ test('one command plus one latest intention coalesces rapid scrub/play/pause wit
 
 test('media generation changes discard old pending/queued scrub and ignore stale video events', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userState(1);
@@ -1229,7 +1246,7 @@ test('media generation changes discard old pending/queued scrub and ignore stale
   p.time = 42;
   b.frame(300, false);
 
-  b.state(ws, initial({ revision: 2, media_revision: 2, video_id: 'abcdefghijk' }));
+  b.state(ws, initial({ revision: 2, media_revision: 2, source: youtube('abcdefghijk') }));
   p.userState(0);
   p.userState(1);
   p.time = 70;
@@ -1247,7 +1264,7 @@ test('media generation changes discard old pending/queued scrub and ignore stale
 
 test('old-video scrubs during Load are discarded; new-media native input may coalesce before Load ack', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   b.get('video-url').value = 'abcdefghijk';
@@ -1258,7 +1275,7 @@ test('old-video scrubs during Load are discarded; new-media native input may coa
   b.frame();
   assert.equal(commands(ws).length, 1);
 
-  b.state(ws, initial({ revision: 1, media_revision: 1, video_id: 'abcdefghijk' }));
+  b.state(ws, initial({ revision: 1, media_revision: 1, source: youtube('abcdefghijk') }));
   p.deliver();
   b.frame();
   b.frame();
@@ -1273,7 +1290,7 @@ test('old-video scrubs during Load are discarded; new-media native input may coa
 
 test('pending native rate plus queued scrub cannot cross a same-ID media generation', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userRate(2);
@@ -1281,7 +1298,7 @@ test('pending native rate plus queued scrub cannot cross a same-ID media generat
   p.time = 42;
   b.frame(300, false);
 
-  b.state(ws, initial({ revision: 2, media_revision: 2, video_id: id }));
+  b.state(ws, initial({ revision: 2, media_revision: 2, source: youtube(id) }));
   ws.receive({ type: 'ack', id: rate.id, revision: 1 });
   p.deliver();
   b.frame();
@@ -1293,16 +1310,16 @@ test('pending native rate plus queued scrub cannot cross a same-ID media generat
 
 test('same ID only re-cues on media_revision change, not pause or seek zero', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
-  b.state(ws, initial({ revision: 1, video_id: id }));
+  b.state(ws, initial({ revision: 1, source: youtube(id) }));
   p.deliver();
   b.frame();
   assert.equal(p.videos.length, 1);
 
   p.options.events.onError({ data: 100 });
-  b.state(ws, initial({ revision: 2, media_revision: 2, video_id: id }));
+  b.state(ws, initial({ revision: 2, media_revision: 2, source: youtube(id) }));
   p.deliver();
   b.frame();
   b.frame();
@@ -1312,7 +1329,7 @@ test('same ID only re-cues on media_revision change, not pause or seek zero', as
 
 test('buffering, stalled local time and short paused buffer transitions never pause/seek room', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id, playing: true }));
+  const ws = await b.welcome(initial({ source: youtube(id), playing: true }));
   const p = b.ready();
 
   p.userState(3);
@@ -1333,7 +1350,7 @@ test('buffering, stalled local time and short paused buffer transitions never pa
 
 test('guest native pause and seeks detach locally; native Play stays local; explicit Rejoin catches up', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id, playing: true }), 'guest');
+  const ws = await b.welcome(initial({ source: youtube(id), playing: true }), 'guest');
   const p = b.ready();
 
   p.userState(2);
@@ -1364,14 +1381,14 @@ test('guest native pause and seeks detach locally; native Play stays local; expl
 
 test('guest paused seek detaches, a new host media selection reattaches with a clear notice', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }), 'guest');
+  const ws = await b.welcome(initial({ source: youtube(id) }), 'guest');
   const p = b.ready();
 
   p.time = 30;
   b.frame(300, false);
   assert.match(b.get('room-notice').textContent, /local on this device/);
 
-  b.state(ws, initial({ revision: 1, media_revision: 1, video_id: id }));
+  b.state(ws, initial({ revision: 1, media_revision: 1, source: youtube(id) }));
   p.deliver();
   b.frame();
   b.frame();
@@ -1382,7 +1399,7 @@ test('guest paused seek detaches, a new host media selection reattaches with a c
 
 test('native host rate is sent once; combined rate + scrub intentions are serialized without loss', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userRate(2, true);
@@ -1410,19 +1427,37 @@ test('native host rate is sent once; combined rate + scrub intentions are serial
   assert.equal(commands(ws).length, count, 'natural 2× advancement is never classified as a scrub');
 });
 
+test('provider replacement adopts its default rate without echoing; direct native changes can supersede a pending rate write', async () => {
+  const b = await browser();
+  const ws = await b.welcome(initial({ source: youtube(id), playback_rate: 2 }));
+  const previous = b.ready();
+  const source = { type: 'direct', url: 'https://example.org/video.webm' };
+  b.state(ws, initial({ source, revision: 1, media_revision: 1, playback_rate: 1 }));
+  const current = b.ready();
+  assert.notEqual(current, previous);
+  assert.equal(previous.destroyed, true);
+  assert.equal(current.rate, 1);
+  assert.equal(commands(ws).length, 0);
+
+  b.state(ws, initial({ source: { ...source }, revision: 2, media_revision: 1, playback_rate: 2 }));
+  current.deliver();
+  current.userRate(1.5);
+  assert.deepEqual(commands(ws).map(message => message.action), [{ type: 'set_rate', playback_rate: 1.5 }]);
+});
+
 test('programmatic rate changes and supported fallback never echo host rate commands', async () => {
-  const b = await browser({ rates: [1, 1.5] }); const ws = await b.welcome(initial({ video_id: id, playback_rate: 2 })); const p = b.ready();
+  const b = await browser({ rates: [1, 1.5] }); const ws = await b.welcome(initial({ source: youtube(id), playback_rate: 2 })); const p = b.ready();
   assert.deepEqual(p.rateWrites, [1.5]);
   assert.match(b.get('room-notice').textContent, /1.5×/);
   assert.equal(commands(ws).length, 0);
-  b.state(ws, initial({ revision: 1, video_id: id, playback_rate: 1 })); p.deliver(); b.frame(); b.frame();
+  b.state(ws, initial({ revision: 1, source: youtube(id), playback_rate: 1 })); p.deliver(); b.frame(); b.frame();
   assert.equal(p.rate, 1);
   assert.equal(commands(ws).length, 0);
 });
 
 test('host native Play at a supported fallback rate does not accidentally change the room rate', async () => {
   const b = await browser({ rates: [1, 1.5] });
-  const ws = await b.welcome(initial({ video_id: id, playback_rate: 2 })); const p = b.ready();
+  const ws = await b.welcome(initial({ source: youtube(id), playback_rate: 2 })); const p = b.ready();
   p.userState(1);
   assert.equal(commands(ws).length, 1);
   assert.equal(commands(ws)[0].action.type, 'play');
@@ -1430,7 +1465,7 @@ test('host native Play at a supported fallback rate does not accidentally change
 });
 
 test('guest rate changes detach locally and Rejoin restores authoritative rate without commands', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playback_rate: 1.5 }), 'guest'); const p = b.ready();
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id), playback_rate: 1.5 }), 'guest'); const p = b.ready();
   p.userRate(2); b.frame();
   assert.equal(b.get('join-playback').hidden, false);
   assert.equal(p.rate, 2);
@@ -1440,7 +1475,7 @@ test('guest rate changes detach locally and Rejoin restores authoritative rate w
 });
 
 test('natural end sends no automatic pause, native replay starts host room at zero', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 99 })); const p = b.ready();
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id), playing: true, position_secs: 99 })); const p = b.ready();
   p.time = 100; p.userState(0);
   assert.equal(commands(ws).length, 0);
   p.time = 0; p.userState(1);
@@ -1449,7 +1484,7 @@ test('natural end sends no automatic pause, native replay starts host room at ze
 
 test('autoplay denial shows local Join and native Play rejoins without a host/guest room command', async () => {
   for (const role of ['host', 'guest']) {
-    const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true }), role); const p = b.ready();
+    const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id), playing: true }), role); const p = b.ready();
     p.state = 2; p.options.events.onAutoplayBlocked();
     assert.equal(b.get('join-playback').hidden, false);
     p.userState(1); p.deliver(); b.frame(); b.frame();
@@ -1460,7 +1495,7 @@ test('autoplay denial shows local Join and native Play rejoins without a host/gu
 
 test('reconnect discards pending and latest native intentions, even across process/rate resets', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userState(1);
@@ -1473,7 +1508,7 @@ test('reconnect discards pending and latest native intentions, even across proce
   b.frame(300, false);
 
   b.click('reconnect-button');
-  const next = await b.welcome(initial({ incarnation: 'b', video_id: id }));
+  const next = await b.welcome(initial({ incarnation: 'b', source: youtube(id) }));
   p.deliver();
   b.frame();
   b.frame();
@@ -1484,7 +1519,7 @@ test('reconnect discards pending and latest native intentions, even across proce
 
 test('stale_revision discards coalesced intent and reconciles only the fresh snapshot', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id }));
+  const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.ready();
 
   p.userState(1);
@@ -1493,7 +1528,7 @@ test('stale_revision discards coalesced intent and reconciles only the fresh sna
   ws.receive({ type: 'error', code: 'stale_revision', id: commands(ws)[0].id, message: 'Room changed' });
   assert.equal(b.get('load-video').disabled, true);
 
-  b.state(ws, initial({ revision: 3, video_id: id, position_secs: 10 }));
+  b.state(ws, initial({ revision: 3, source: youtube(id), position_secs: 10 }));
   p.deliver();
   b.frame();
   b.frame();
@@ -1518,7 +1553,7 @@ test('online during pending welcome closes old lease and ignores its delayed cal
 
 test('hidden-tab time gaps are not scrubs; visibility sync and silent-open sockets recover', async () => {
   const b = await browser();
-  const ws = await b.welcome(initial({ video_id: id, playing: true }));
+  const ws = await b.welcome(initial({ source: youtube(id), playing: true }));
   const p = b.ready();
 
   b.document.hidden = true;
@@ -1546,11 +1581,11 @@ test('hidden-tab time gaps are not scrubs; visibility sync and silent-open socke
 });
 
 test('API and iframe readiness failures expose functional generation-safe local retry', async () => {
-  const api = await browser({ api: false }); await api.welcome(initial({ video_id: id }));
+  const api = await browser({ api: false }); await api.welcome(initial({ source: youtube(id) }));
   api.document.head.scripts[0].onerror(); await api.flush(); await api.flush();
   assert.match(api.get('room-error').textContent, /YouTube could not load/);
   api.click('join-playback'); assert.equal(api.document.head.scripts.length, 2);
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id }), 'guest'); const old = b.players[0];
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id) }), 'guest'); const old = b.players[0];
   b.fireTimer(15000);
   assert.equal(old.destroyed, true);
   assert.match(b.get('room-error').textContent, /did not become ready/);
@@ -1564,7 +1599,7 @@ test('API and iframe readiness failures expose functional generation-safe local 
 });
 
 test('embed errors cannot mask expiry; unavailable and invalid token stop reconnect permanently', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id) })); const p = b.ready();
   p.options.events.onError({ data: 150 }); assert.match(b.get('room-error').textContent, /does not allow/);
   ws.receive({ type: 'error', code: 'unavailable', id: null });
   assert.match(b.get('room-error').textContent, /expired/);
@@ -1579,9 +1614,9 @@ test('embed errors cannot mask expiry; unavailable and invalid token stop reconn
 test('guest joins an already-playing room before onReady using a single atomic media load', async () => {
   const videoId = 'M7lc1UVf-VE';
   const b = await browser({ unavailableInitialCaches: true });
-  const ws = await b.welcome(initial({ video_id: videoId, revision: 1 }), 'guest');
+  const ws = await b.welcome(initial({ source: youtube(videoId), revision: 1 }), 'guest');
   const p = b.players[0];
-  b.state(ws, initial({ video_id: videoId, revision: 2, playing: true, position_secs: 30 }));
+  b.state(ws, initial({ source: youtube(videoId), revision: 2, playing: true, position_secs: 30 }));
   assert.equal(p.videoId, '', 'no video metadata in the initial iframe yet');
   p.ready();
   assert.deepEqual(p.loads, [{ videoId, startSeconds: 30 }]);
@@ -1598,7 +1633,7 @@ test('guest joins an already-playing room before onReady using a single atomic m
 });
 
 test('atomic startup load retains the local autoplay watchdog and functional Join recovery', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 30 }), 'guest');
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id), playing: true, position_secs: 30 }), 'guest');
   const p = b.players[0]; p.ready();
   assert.equal(p.loads.length, 1);
   p.messages = [];
@@ -1617,7 +1652,7 @@ test('atomic startup load retains the local autoplay watchdog and functional Joi
 });
 
 test('the asynchronous iframe model reproduces error 2 for cue then immediate empty-video Play', async () => {
-  const b = await browser(); await b.welcome(initial({ video_id: id })); const p = b.players[0];
+  const b = await browser(); await b.welcome(initial({ source: youtube(id) })); const p = b.players[0];
   const errors = []; p.options.events.onError = ({ data }) => errors.push(data);
   p.cueVideoById({ videoId: id, startSeconds: 30 });
   p.playVideo(); p.deliver();
@@ -1627,7 +1662,7 @@ test('the asynchronous iframe model reproduces error 2 for cue then immediate em
 });
 
 test('local retry of a playing room with unloaded media uses atomic load, not cue/seek/play', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id, playing: true, position_secs: 30 }), 'guest');
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id), playing: true, position_secs: 30 }), 'guest');
   const p = b.players[0]; p.ready(); p.deliver(); b.frame(); b.frame();
   p.options.events.onError({ data: 2 });
   const loads = p.loads.length; const plays = p.plays; const seeks = p.seeks.length;
@@ -1646,7 +1681,7 @@ test('local retry of a playing room with unloaded media uses atomic load, not cu
 test('onReady with undefined video and rate caches loads successfully and applies rates once available', async () => {
   for (const playing of [false, true]) {
     const b = await browser({ unavailableInitialCaches: true });
-    const ws = await b.welcome(initial({ video_id: id, playback_rate: 1.5, playing }));
+    const ws = await b.welcome(initial({ source: youtube(id), playback_rate: 1.5, playing }));
     const p = b.players[0]; p.ready();
     assert.equal(b.get('room-error').textContent, '');
     assert.equal(p.videos.length, 1, 'cue must not be blocked by absent startup caches');
@@ -1661,7 +1696,7 @@ test('onReady with undefined video and rate caches loads successfully and applie
 
 test('native Play BUFFERING then interval then PLAYING is not canceled in a paused room', async () => {
   for (const role of ['host', 'guest']) {
-    const b = await browser(); const ws = await b.welcome(initial({ revision: 1, video_id: id }), role);
+    const b = await browser(); const ws = await b.welcome(initial({ revision: 1, source: youtube(id) }), role);
     const p = b.ready(); const pauses = p.pauses;
     p.time = 0.09; p.userState(3); b.frame(300, false);
     assert.equal(p.pauses, pauses, 'no pauseVideo before native PLAYING');
@@ -1680,9 +1715,9 @@ test('native Play BUFFERING then interval then PLAYING is not canceled in a paus
 });
 
 test('a fresh authoritative pause revision still stops a buffering transition', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.ready();
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id) })); const p = b.ready();
   p.userState(3); const pauses = p.pauses;
-  b.state(ws, initial({ revision: 1, video_id: id }));
+  b.state(ws, initial({ revision: 1, source: youtube(id) }));
   assert.equal(p.pauses, pauses + 1);
   p.deliver(); b.frame(); b.frame();
   assert.equal(commands(ws).length, 0);
@@ -1690,7 +1725,7 @@ test('a fresh authoritative pause revision still stops a buffering transition', 
 
 test('native initial Play before CUED or any cue sample survives the unconfirmed paused operation', async () => {
   for (const role of ['host', 'guest']) {
-    const b = await browser(); const ws = await b.welcome(initial({ video_id: id }), role);
+    const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id) }), role);
     const p = b.players[0]; p.ready();
     p.messages = [];
     p.videoId = id;
@@ -1707,7 +1742,7 @@ test('native initial Play before CUED or any cue sample survives the unconfirmed
 });
 
 test('initial Play callback with unavailable video cache is retained by later stable getter samples', async () => {
-  const b = await browser({ unavailableInitialCaches: true }); const ws = await b.welcome(initial({ video_id: id }));
+  const b = await browser({ unavailableInitialCaches: true }); const ws = await b.welcome(initial({ source: youtube(id) }));
   const p = b.players[0]; p.ready(); p.messages = [];
   p.userState(1);
   assert.equal(commands(ws).length, 0);
@@ -1716,7 +1751,7 @@ test('initial Play callback with unavailable video cache is retained by later st
 });
 
 test('short late old PLAYING callback during an unconfirmed cue never echoes', async () => {
-  const b = await browser(); const ws = await b.welcome(initial({ video_id: id })); const p = b.players[0];
+  const b = await browser(); const ws = await b.welcome(initial({ source: youtube(id) })); const p = b.players[0];
   p.ready(); p.messages = []; p.videoId = id;
   p.userState(1); b.frame(100, false); p.userState(5); p.userState(2);
   b.frame(); b.frame();
@@ -1725,7 +1760,7 @@ test('short late old PLAYING callback during an unconfirmed cue never echoes', a
 });
 
 test('synchronization warnings include the caught cause but redact host secrets', async () => {
-  const b = await browser({ token: 'secret' }); await b.welcome(initial({ video_id: id })); const p = b.ready();
+  const b = await browser({ token: 'secret' }); await b.welcome(initial({ source: youtube(id) })); const p = b.ready();
   p.getDuration = () => { throw Error('broken duration secret #host=another-secret'); };
   b.frame();
   assert.equal(b.warnings.length, 1);

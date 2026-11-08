@@ -108,7 +108,7 @@ try {
   if (/^[0-9a-f]{64}$/.test(saved ?? '')) resumeToken = saved;
 } catch {}
 
-const helpers = await import(document.body.dataset.syncUrl).catch(() => {
+const helpers = await Promise.all([import(document.body.dataset.syncUrl), import(document.body.dataset.playersUrl)]).catch(() => {
   text('room-error', 'The room client could not load. Reload this page to retry.');
   text('connection-status', 'Client unavailable');
 
@@ -121,10 +121,10 @@ const helpers = await import(document.body.dataset.syncUrl).catch(() => {
 });
 
 if (helpers) {
-  const {
+  const [{
     ClockFilter, SnapshotOrder, NativePlaybackObserver, targetPosition, shouldSeek,
-    reconnectDelay, parseVideoId, visibleProblem, playbackUpdate, supportedRate, avatarPattern,
-  } = helpers;
+    reconnectDelay, parseMediaSource, sourceKey, visibleProblem, playbackUpdate, supportedRate, avatarPattern,
+  }, { PlayerState, youtubePlayer, directPlayer }] = helpers;
   const clock = new ClockFilter();
   const ordering = new SnapshotOrder();
   const native = new NativePlaybackObserver();
@@ -167,6 +167,7 @@ if (helpers) {
   let playerMountParent = null;
   let loadingPlayer = false;
   let loadedVideo = null;
+  let playerKind = null;
   let buffering = false;
   let detached = false;
   let autoplayBlocked = false;
@@ -233,16 +234,19 @@ if (helpers) {
         label.className = 'mb-1 block text-[9px] tracking-wider text-primary';
         label.textContent = 'SOMETHING FOR THE ROOM';
         const link = document.createElement('a');
-        link.className = 'block text-[13px] text-foreground/80 hover:underline';
-        link.href = `https://www.youtube.com/watch?v=${entry.video_id}`;
+        link.className = 'block text-[13px] text-foreground/80 hover:underline [overflow-wrap:anywhere]';
+        link.href = entry.source.type === 'youtube' ? `https://www.youtube.com/watch?v=${entry.source.id}` : entry.source.url;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
-        link.textContent = `YouTube · ${entry.video_id}`;
+        const linkLabel = entry.source.type === 'youtube' ? `YouTube · ${entry.source.id}`
+          : `Video · ${new URL(entry.source.url).pathname.split('/').pop()}`;
+        link.textContent = linkLabel.length > 72 ? `${linkLabel.slice(0, 69)}…` : linkLabel;
+        link.title = link.href;
         const button = document.createElement('button');
         button.className = 'mt-2 min-h-9 rounded-md border-0 bg-popover px-3 py-1.5 text-[11px] text-foreground hover:bg-foreground/10';
         button.type = 'button';
         button.textContent = 'Watch this together';
-        button.addEventListener?.('click', () => command({ type: 'set_video', video_id: entry.video_id }));
+        button.addEventListener?.('click', () => command({ type: 'set_video', source: entry.source }));
         const hint = document.createElement('p');
         hint.className = 'mt-2 text-[10px] text-muted-foreground';
         hint.textContent = 'A Keeper or Co-keeper can put this on.';
@@ -407,12 +411,13 @@ if (helpers) {
     text('room-name', snapshot?.room_name ?? 'Your viewing room');
     text('member-count', snapshot ? String(snapshot.members) : '—');
     text('room-code', roomId ?? '');
-    text('playback-status', !snapshot?.video_id ? 'YouTube · waiting for a video'
-      : !connected ? 'YouTube · reconnecting' : detached ? 'YouTube · watching locally' : 'YouTube · following room');
+    const provider = snapshot?.source?.type === 'youtube' ? 'YouTube' : 'Video';
+    text('playback-status', !snapshot?.source ? 'Waiting for a video'
+      : !connected ? `${provider} · reconnecting` : detached ? `${provider} · watching locally` : `${provider} · following room`);
     text('room-error', visibleProblem(roomError, playerError));
     text('room-notice', detached
       ? 'Playback is local on this device. Rejoin playback to catch up with the room.' : notice);
-    text('playback-help', snapshot?.video_id
+    text('playback-help', snapshot?.source
       ? 'Keeper and Co-keeper player controls apply to everyone. Companions can suggest a video.'
       : 'Load a video to get started.');
 
@@ -431,13 +436,13 @@ if (helpers) {
       element('join-playback').hidden = terminal || (!detached && !autoplayBlocked && !playerError);
       element('join-playback').textContent = playerError ? 'Retry playback on this device'
         : detached ? 'Rejoin playback' : 'Join playback on this device';
-      element('join-playback').disabled = !connected || loadingPlayer || !snapshot?.video_id;
+      element('join-playback').disabled = !connected || loadingPlayer || !snapshot?.source;
     }
     if (element('reconnect-button')) {
       element('reconnect-button').hidden = connected || terminal;
       element('reconnect-button').disabled = terminal;
     }
-    if (element('player-placeholder')) element('player-placeholder').hidden = !!snapshot?.video_id;
+    if (element('player-placeholder')) element('player-placeholder').hidden = !!snapshot?.source;
   }
 
   function send(message) {
@@ -589,7 +594,7 @@ if (helpers) {
 
         if (pending && !pending.native && pending.action.type === 'set_video') {
           pending.mediaAccepted = snapshot.incarnation === pending.incarnation
-            && snapshot.media_revision > pending.mediaRevision && snapshot.video_id === pending.action.video_id;
+            && snapshot.media_revision > pending.mediaRevision && sourceKey(snapshot.source) === sourceKey(pending.action.source);
         }
         forceSeek ||= update.forceSeek || welcome;
         recoverySeek ||= welcome;
@@ -597,6 +602,7 @@ if (helpers) {
         awaitingSync = false;
 
         if (update.resetVideo) {
+          if (playerKind && playerKind !== snapshot.source?.type) resetPlayer();
           if (pending?.native) clearPending();
           latestIntent = null;
           native.reset();
@@ -606,7 +612,7 @@ if (helpers) {
           playerError = '';
           autoplayBlocked = false;
           buffering = false;
-          if (detached && previousSnapshot?.video_id) notice = 'The host selected a video. You are following the room again.';
+          if (detached && previousSnapshot?.source) notice = 'The host selected a video. You are following the room again.';
           detached = false;
           lastSeekMs = -Infinity;
         }
@@ -705,7 +711,7 @@ if (helpers) {
   function flushIntent() {
     if (!latestIntent || pending || awaitingSync || !connected || !canControl() || playerError || !playerReady) return;
     const intent = latestIntent;
-    if (intent.incarnation !== snapshot.incarnation || intent.videoId !== snapshot.video_id
+    if (intent.incarnation !== snapshot.incarnation || intent.videoId !== sourceKey(snapshot.source)
       || intent.mediaRevision !== snapshot.media_revision) {
       latestIntent = null;
       return;
@@ -757,6 +763,7 @@ if (helpers) {
 
     const previous = player;
     player = null;
+    playerKind = null;
     playerReady = false;
     loadedVideo = null;
     buffering = false;
@@ -776,85 +783,101 @@ if (helpers) {
     if (!mount || mount.tagName !== 'DIV') {
       const replacement = document.createElement('div');
       replacement.id = 'player-mount';
+      replacement.className = 'absolute inset-0 size-full';
       if (mount) mount.replaceWith(replacement);
       else playerMountParent?.append(replacement);
     }
   }
 
   async function ensurePlayer() {
-    if (!snapshot?.video_id || loadingPlayer || player || playerError) return;
+    if (!snapshot?.source || loadingPlayer || player || playerError) return;
     loadingPlayer = true;
+    const requested = sourceKey(snapshot.source);
     try {
-      await loadYouTubeApi();
-      if (!snapshot?.video_id || terminal) return;
+      if (snapshot.source.type === 'youtube') await loadYouTubeApi();
+      if (!snapshot?.source || sourceKey(snapshot.source) !== requested || terminal) return;
       const generation = ++playerGeneration;
       playerMountParent = element('player-mount')?.parentNode ?? playerMountParent;
       playerReadyTimer = setTimeout(() => {
         if (generation !== playerGeneration || playerReady || terminal) return;
         resetPlayer();
-        playerError = 'The YouTube player did not become ready. Check your connection or content blocker, then retry playback.';
+        playerError = 'The video did not become ready. Check the link or your connection, then retry playback.';
         notice = '';
         render();
       }, 15000);
-      player = new YT.Player('player-mount', {
-        width: '100%', height: '100%',
-        playerVars: { controls: 1, disablekb: 0, fs: 1, playsinline: 1, rel: 0, origin: location.origin },
-        events: {
-          onReady: () => {
-            if (generation !== playerGeneration || terminal) return;
-            clearTimeout(playerReadyTimer);
-            playerReadyTimer = null;
-            playerReady = true;
-            recoverySeek = true;
-            recover();
-            render();
-          },
-          onStateChange: (event) => {
-            if (generation !== playerGeneration || terminal) return;
-            const wasBuffering = buffering;
-            updatePlayer(event.data);
-            if (wasBuffering && !buffering) {
-              recoverySeek = true;
-              ping();
-              send({ type: 'sync' });
-            }
-            render();
-          },
-          onAutoplayBlocked: () => { if (generation === playerGeneration && !terminal) markAutoplayBlocked(); },
-          onPlaybackRateChange: (event) => {
-            if (generation === playerGeneration && !terminal) { updatePlayer(undefined, event.data); render(); }
-          },
-          onError: (event) => {
-            if (generation !== playerGeneration || terminal) return;
-            if (!playerReady) resetPlayer();
-            clearTimeout(autoplayTimer);
-            autoplayTimer = null;
-            buffering = false;
-            const errors = {
-              2: 'YouTube rejected this video ID.',
-              5: 'This browser could not play the video. Retry playback or try another browser.',
-              100: 'This video is unavailable or private. The host can choose another video.',
-              101: 'The owner does not allow this video to be embedded. Choose another video.',
-              150: 'The owner does not allow this video to be embedded. Choose another video.',
-              153: 'YouTube could not verify this embed. Check browser privacy settings or try another browser.',
-            };
-            playerError = errors[event.data] || 'YouTube could not play this video. The host can choose another video.';
-            render();
-          },
+      const events = {
+        onReady: () => {
+          if (generation !== playerGeneration || terminal) return;
+          clearTimeout(playerReadyTimer);
+          playerReadyTimer = null;
+          playerReady = true;
+          recoverySeek = true;
+          recover();
+          render();
         },
-      });
+        onStateChange: (event) => {
+          if (generation !== playerGeneration || terminal) return;
+          const wasBuffering = buffering;
+          updatePlayer(event.data);
+          if (wasBuffering && !buffering) {
+            recoverySeek = true;
+            ping();
+            send({ type: 'sync' });
+          }
+          render();
+        },
+        onAutoplayBlocked: () => { if (generation === playerGeneration && !terminal) markAutoplayBlocked(); },
+        onPlaybackRateChange: (event) => {
+          if (generation === playerGeneration && !terminal) { updatePlayer(undefined, event.data); render(); }
+        },
+        onError: (event) => {
+          if (generation !== playerGeneration || terminal) return;
+          if (!playerReady) resetPlayer();
+          clearTimeout(autoplayTimer);
+          autoplayTimer = null;
+          buffering = false;
+          if (snapshot.source.type === 'direct') {
+            playerError = 'This video could not play. Check that the link is reachable, uses HTTPS on a secure page, and has a format this browser supports.';
+            render();
+            return;
+          }
+          const errors = {
+            2: 'YouTube rejected this video ID.',
+            5: 'This browser could not play the video. Retry playback or try another browser.',
+            100: 'This video is unavailable or private. The host can choose another video.',
+            101: 'The owner does not allow this video to be embedded. Choose another video.',
+            150: 'The owner does not allow this video to be embedded. Choose another video.',
+            153: 'YouTube could not verify this embed. Check browser privacy settings or try another browser.',
+          };
+          playerError = errors[event.data] || 'YouTube could not play this video. The host can choose another video.';
+          render();
+        },
+      };
+      playerKind = snapshot.source.type;
+      player = playerKind === 'direct'
+        ? directPlayer(element('player-mount'), snapshot.source, events)
+        : youtubePlayer(new YT.Player('player-mount', {
+          width: '100%', height: '100%',
+          playerVars: { controls: 1, disablekb: 0, fs: 1, playsinline: 1, rel: 0, origin: location.origin }, events,
+        }));
     } catch (error) {
+      if (sourceKey(snapshot?.source) !== requested) return;
       resetPlayer();
-      playerError = error.message || 'YouTube could not load. Try again.';
+      playerError = error.message || 'The video could not load. Try again.';
       notice = '';
-    } finally { loadingPlayer = false; render(); }
+    } finally {
+      loadingPlayer = false;
+      render();
+      if (!player && !playerError && snapshot?.source && !terminal) ensurePlayer();
+    }
   }
 
   function applyRate() {
-    const rate = supportedRate(snapshot.playback_rate, player.getAvailablePlaybackRates?.());
+    const rate = supportedRate(snapshot.playback_rate, player.getAvailablePlaybackRates?.(snapshot.playback_rate));
     if (rate === null) return;
     if (rate !== snapshot.playback_rate) notice = `This video cannot use the room’s speed. Following at ${rate}× on this device.`;
-    if (rateGuard?.rate === rate || (!rateGuard && player.getPlaybackRate?.() === rate)) return;
+    if (rateGuard?.rate === rate) return;
+    if (!rateGuard && player.getPlaybackRate?.() === rate) { localRate = rate; return; }
     rateGuard = { rate, until: performance.now() + 4000, settledAt: null };
     localRate = rate;
     player.setPlaybackRate(rate);
@@ -864,6 +887,7 @@ if (helpers) {
     const now = performance.now();
     let rate = eventRate ?? player.getPlaybackRate?.();
     if (!Number.isFinite(rate) || rate < 0.25 || rate > 4) return false;
+    if (eventRate !== undefined && playerKind === 'direct' && rateGuard && rate !== rateGuard.rate) rateGuard = null;
     if (eventRate !== undefined) rateEvent = { rate, at: now };
     else if (rateEvent) {
       if (rate === rateEvent.rate || now - rateEvent.at >= 750) rateEvent = null;
@@ -889,7 +913,7 @@ if (helpers) {
         : previous?.rate ?? pending?.intention?.rate ?? snapshot.playback_rate;
       latestIntent = { ...intent, rate: intendedRate, observedRate: localRate,
         needsPlayback: intent.kind !== 'rate' || !!previous?.needsPlayback,
-        incarnation: snapshot.incarnation, videoId: snapshot.video_id, mediaRevision: snapshot.media_revision };
+        incarnation: snapshot.incarnation, videoId: sourceKey(snapshot.source), mediaRevision: snapshot.media_revision };
     } else { detached = true; notice = ''; }
     autoplayBlocked = false;
     render();
@@ -900,7 +924,7 @@ if (helpers) {
     autoplayTimer = null;
     autoplayBlocked = true;
     native.reset();
-    if (playerReady) native.observe(player.getCurrentTime(), YT.PlayerState.PAUSED, performance.now(), false, localRate);
+    if (playerReady) native.observe(player.getCurrentTime(), PlayerState.PAUSED, performance.now(), false, localRate);
     notice = 'Your browser needs a tap to start audio. Join playback on this device.';
     render();
   }
@@ -909,20 +933,20 @@ if (helpers) {
     clearTimeout(autoplayTimer);
     autoplayTimer = setTimeout(() => {
       autoplayTimer = null;
-      if (snapshot?.playing && !detached && !buffering && player.getPlayerState() !== YT.PlayerState.PLAYING) markAutoplayBlocked();
+      if (snapshot?.playing && !detached && !buffering && player.getPlayerState() !== PlayerState.PLAYING) markAutoplayBlocked();
     }, 2500);
   }
 
   function observeNative(eventState, eventRate) {
-    if (!connected || !playerReady || !snapshot?.video_id || playerError || document.hidden) return;
-    if (loadedVideo !== snapshot.video_id || player.getVideoData?.()?.video_id !== snapshot.video_id) return;
+    if (!connected || !playerReady || !snapshot?.source || playerError || document.hidden) return;
+    if (loadedVideo !== sourceKey(snapshot.source) || player.getSourceKey?.() !== sourceKey(snapshot.source)) return;
     if (pending && !pending.native && !pending.mediaAccepted) return;
 
     const blocked = autoplayBlocked;
     const changedRate = observeRate(eventRate);
     const intent = native.observe(player.getCurrentTime(), eventState ?? player.getPlayerState(), performance.now(), eventState !== undefined, localRate);
-    buffering = native.state === YT.PlayerState.BUFFERING;
-    if (native.state === YT.PlayerState.PLAYING) {
+    buffering = native.state === PlayerState.BUFFERING;
+    if (native.state === PlayerState.PLAYING) {
       clearTimeout(autoplayTimer);
       autoplayTimer = null;
     }
@@ -939,17 +963,17 @@ if (helpers) {
     if (!connected || !playerReady || document.hidden) return;
     try {
       if (recoveringPlayer) {
-        if (awaitingSync || !snapshot?.video_id) return;
+        if (awaitingSync || !snapshot?.source) return;
         if (detached) {
           recoveringPlayer = false;
           return;
         }
         if (!recoveryMediaChecked) {
-          const cachedVideo = player.getVideoData?.()?.video_id;
-          if (typeof cachedVideo === 'string' && (cachedVideo || player.getPlayerState() === YT.PlayerState.UNSTARTED)) {
-            if (cachedVideo !== snapshot.video_id) loadedVideo = null;
+          const cachedVideo = player.getSourceKey?.();
+          if (typeof cachedVideo === 'string' && (cachedVideo || player.getPlayerState() === PlayerState.UNSTARTED)) {
+            if (cachedVideo !== sourceKey(snapshot.source)) loadedVideo = null;
             recoveryMediaChecked = true;
-          } else if (player.getPlayerState() === YT.PlayerState.UNSTARTED || !cachedVideo && snapshot.playing) {
+          } else if (player.getPlayerState() === PlayerState.UNSTARTED || !cachedVideo && snapshot.playing) {
             return;
           }
           if (recoveryMediaChecked) {
@@ -962,20 +986,20 @@ if (helpers) {
         const intent = native.observe(player.getCurrentTime(), eventState ?? player.getPlayerState(),
           performance.now(), eventState !== undefined, localRate);
         if (autoplayBlocked && intent?.playing && intent.kind === 'state'
-          && player.getVideoData?.()?.video_id === snapshot.video_id) {
+          && player.getSourceKey?.() === sourceKey(snapshot.source)) {
           rejoin();
           return;
         }
-        buffering = native.state === YT.PlayerState.BUFFERING;
+        buffering = native.state === PlayerState.BUFFERING;
         reconcile();
         const state = player.getPlayerState();
-        const atEnd = snapshot.playing && state === YT.PlayerState.ENDED
+        const atEnd = snapshot.playing && state === PlayerState.ENDED
           && player.getDuration() > 0
           && targetPosition(snapshot, clock.serverNow(performance.now())) >= player.getDuration() - 1;
         if (!native.settling && !rateGuard && !native.waiting
-          && player.getVideoData?.()?.video_id === snapshot.video_id
-          && (autoplayBlocked || atEnd || state === (snapshot.playing ? YT.PlayerState.PLAYING : YT.PlayerState.PAUSED)
-            || (!snapshot.playing && state === YT.PlayerState.CUED))) {
+          && player.getSourceKey?.() === sourceKey(snapshot.source)
+          && (autoplayBlocked || atEnd || state === (snapshot.playing ? PlayerState.PLAYING : PlayerState.PAUSED)
+            || (!snapshot.playing && state === PlayerState.CUED))) {
           recoveringPlayer = false;
         }
         return;
@@ -987,42 +1011,43 @@ if (helpers) {
       let cause = String(error?.message ?? error);
       if (hostToken) cause = cause.split(hostToken).join('[redacted]');
       if (memberToken) cause = cause.split(memberToken).join('[redacted]');
+      if (resumeToken) cause = cause.split(resumeToken).join('[redacted]');
       cause = cause.replace(/([#?&]host=)[^\s&]+/g, '$1[redacted]');
-      console.warn('YouTube synchronization failed:', cause);
-      playerError = 'The YouTube player could not synchronize. Retry playback on this device.';
+      console.warn('Video synchronization failed:', cause);
+      playerError = 'The video could not synchronize. Retry playback on this device.';
       render();
     }
   }
 
   function reconcile() {
-    if (!snapshot?.video_id || !playerReady || playerError || awaitingSync || detached) return;
+    if (!snapshot?.source || !playerReady || playerError || awaitingSync || detached) return;
     if (pending?.native || latestIntent || native.waiting) return;
 
     const now = performance.now();
-    const newVideo = loadedVideo !== snapshot.video_id;
+    const newVideo = loadedVideo !== sourceKey(snapshot.source);
     if (!newVideo) applyRate();
     if (native.settling && !forceSeek && !newVideo) return;
     const duration = newVideo ? Infinity : player.getDuration();
     const target = targetPosition(snapshot, clock.serverNow(now), duration);
     const state = native.state ?? player.getPlayerState();
     const seek = !newVideo && shouldSeek(player.getCurrentTime(), target, now, lastSeekMs, forceSeek, buffering, recoverySeek);
-    const play = snapshot.playing && !autoplayBlocked && !buffering && state !== YT.PlayerState.PLAYING
-      && (state !== YT.PlayerState.ENDED || target < (player.getDuration() || Infinity) - 1);
-    const pause = !snapshot.playing && (state === YT.PlayerState.PLAYING
-      || (state === YT.PlayerState.BUFFERING && forceSeek));
+    const play = snapshot.playing && !autoplayBlocked && !buffering && state !== PlayerState.PLAYING
+      && (state !== PlayerState.ENDED || target < (player.getDuration() || Infinity) - 1);
+    const pause = !snapshot.playing && (state === PlayerState.PLAYING
+      || (state === PlayerState.BUFFERING && forceSeek));
     forceSeek = false;
     recoverySeek = false;
     if (!newVideo && !seek && !play && !pause) return;
 
     native.suppress(snapshot.playing, newVideo || seek ? target : null, now, localRate,
-      !recoveringPlayer && state !== YT.PlayerState.PLAYING);
+      !recoveringPlayer && state !== PlayerState.PLAYING);
     if (newVideo) {
-      loadedVideo = snapshot.video_id;
+      loadedVideo = sourceKey(snapshot.source);
       if (snapshot.playing && !autoplayBlocked) {
-        player.loadVideoById({ videoId: loadedVideo, startSeconds: target });
+        player.load(snapshot.source, target, true);
         watchAutoplay();
       } else {
-        player.cueVideoById({ videoId: loadedVideo, startSeconds: target });
+        player.load(snapshot.source, target, false);
         player.pauseVideo();
       }
       applyRate();
@@ -1031,7 +1056,7 @@ if (helpers) {
     }
 
     if (seek) {
-      player.seekTo(target, true);
+      player.seekTo(target);
       lastSeekMs = now;
     }
     if (snapshot.playing && !autoplayBlocked) {
@@ -1040,26 +1065,26 @@ if (helpers) {
   }
 
   function rejoin() {
-    if (!connected || !snapshot?.video_id) return;
+    if (!connected || !snapshot?.source) return;
     detached = false;
     autoplayBlocked = false;
     notice = '';
     if (playerError) {
       playerError = '';
-      loadedVideo = null;
-      native.reset();
+      if (!playerReady || playerKind === 'direct') resetPlayer();
+      else { loadedVideo = null; native.reset(); }
     }
     if (!playerReady) { ensurePlayer(); render(); return; }
 
-    const newVideo = loadedVideo !== snapshot.video_id;
+    const newVideo = loadedVideo !== sourceKey(snapshot.source);
     const target = targetPosition(snapshot, clock.serverNow(performance.now()), newVideo ? Infinity : player.getDuration());
     native.suppress(snapshot.playing, target, performance.now(), localRate);
     if (newVideo) {
-      loadedVideo = snapshot.video_id;
-      if (snapshot.playing) player.loadVideoById({ videoId: loadedVideo, startSeconds: target });
-      else { player.cueVideoById({ videoId: loadedVideo, startSeconds: target }); player.pauseVideo(); }
+      loadedVideo = sourceKey(snapshot.source);
+      if (snapshot.playing) player.load(snapshot.source, target, true);
+      else { player.load(snapshot.source, target, false); player.pauseVideo(); }
     } else {
-      player.seekTo(target, true);
+      player.seekTo(target);
       if (snapshot.playing) player.playVideo();
       else player.pauseVideo();
     }
@@ -1073,14 +1098,14 @@ if (helpers) {
 
   element('video-form')?.addEventListener('submit', (event) => {
     event.preventDefault();
-    const videoId = parseVideoId(element('video-url')?.value);
+    const videoId = parseMediaSource(element('video-url')?.value);
     if (!videoId) {
-      roomError = 'Enter a valid YouTube watch, shorts, embed, or youtu.be link (or an 11-character video ID).';
+      roomError = 'Enter a YouTube link or a direct video URL (.mp4, .webm, .ogv, .ogg, .m4v or .mov).';
       render();
       return;
     }
-    const submitted = canControl() ? command({ type: 'set_video', video_id: videoId })
-      : social({ type: 'propose_video', video_id: videoId }, 'video-url');
+    const submitted = canControl() ? command({ type: 'set_video', source: videoId })
+      : social({ type: 'propose_video', source: videoId }, 'video-url');
     if (submitted && element('theater-video')?.dataset.open === 'true') {
       setVideoExpanded(false);
       if (element('video-toggle')?.getClientRects().length) element('video-toggle').focus();
@@ -1090,8 +1115,8 @@ if (helpers) {
     event.preventDefault();
     const value = element('chat-message')?.value.trim();
     if (!value) return;
-    const videoId = parseVideoId(value);
-    social(videoId ? { type: 'propose_video', video_id: videoId } : { type: 'message', text: value }, 'chat-message');
+    const videoId = parseMediaSource(value);
+    social(videoId ? { type: 'propose_video', source: videoId } : { type: 'message', text: value }, 'chat-message');
   });
   element('chat-unread')?.addEventListener('click', () => {
     const feed = element('chat-feed');
@@ -1105,7 +1130,7 @@ if (helpers) {
   element('join-playback')?.addEventListener('click', rejoin);
   element('reconnect-button')?.addEventListener('click', () => {
     if (terminal) return;
-    if (!playerReady && snapshot?.video_id) { playerError = ''; ensurePlayer(); }
+    if (!playerReady && snapshot?.source) { playerError = ''; ensurePlayer(); }
     connect();
   });
 

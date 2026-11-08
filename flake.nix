@@ -46,6 +46,7 @@
               filter =
                 path: type:
                 craneLib.filterCargoSources path type
+                || path == "${toString ./.}/tests/media-sources.json"
                 || pkgs.lib.hasPrefix "${toString ./.}/assets/" path
                 || pkgs.lib.hasSuffix ".css" path;
             };

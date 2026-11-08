@@ -155,7 +155,7 @@ async fn public_websockets_need_no_site_key_but_guests_still_cannot_control_play
         &mut guest,
         "forbidden",
         0,
-        json!({"type":"set_video", "video_id":"dQw4w9WgXcQ"}),
+        json!({"type":"set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"}}),
     )
     .await;
     let error = receive(&mut guest, |message| {
@@ -241,7 +241,7 @@ async fn identity_without_session_credentials_reconnects_privately_without_moder
         &mut returning,
         "forbidden",
         0,
-        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     let error = receive(&mut returning, |message| {
@@ -360,7 +360,7 @@ async fn resume_credentials_preserve_roles_and_presence_over_real_sockets_withou
         &mut returned,
         "load",
         0,
-        json!({"type":"set_video", "video_id":"dQw4w9WgXcQ"}),
+        json!({"type":"set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"}}),
     )
     .await;
     assert_eq!(ack(&mut returned, "load").await["revision"], 1);
@@ -475,7 +475,7 @@ async fn host_guest_and_reconnect_converge_over_real_websockets() {
         &mut guest,
         "forbidden",
         0,
-        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     let error = receive(&mut guest, |message| {
@@ -488,7 +488,7 @@ async fn host_guest_and_reconnect_converge_over_real_websockets() {
         &mut host,
         "load",
         0,
-        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     assert_eq!(ack(&mut host, "load").await["revision"], 1);
@@ -496,14 +496,17 @@ async fn host_guest_and_reconnect_converge_over_real_websockets() {
         message["type"] == "snapshot" && message["snapshot"]["revision"] == 1
     })
     .await;
-    assert_eq!(snapshot["snapshot"]["video_id"], "dQw4w9WgXcQ");
+    assert_eq!(
+        snapshot["snapshot"]["source"],
+        json!({"type":"youtube", "id":"dQw4w9WgXcQ"})
+    );
     assert_eq!(snapshot["snapshot"]["media_revision"], 1);
 
     command(
         &mut host,
         "load",
         0,
-        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     assert_eq!(ack(&mut host, "load").await["revision"], 1);
@@ -621,6 +624,110 @@ async fn sync_snapshot(socket: &mut Socket) -> Value {
 }
 
 #[tokio::test]
+async fn direct_and_youtube_sources_share_proposals_moderation_and_rate_state() {
+    let server = TestServer::start().await;
+    let created = server.rooms.create().unwrap();
+    let mut host = server.connect(&created.room_id).await;
+    join(&mut host, Some(&created.host_token)).await;
+    let mut peer = server.connect(&created.room_id).await;
+    let member = join(&mut peer, None).await;
+    let mut revision = 0;
+    for (index, source) in [
+        json!({"type":"youtube", "id":"dQw4w9WgXcQ"}),
+        json!({"type":"direct", "url":"https://example.org/video.mp4?signature=a%2Fb"}),
+        json!({"type":"direct", "url":"https://example.org/video.webm"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("suggest-{index}");
+        social(
+            &mut peer,
+            &id,
+            json!({"type":"propose_video", "source":source}),
+        )
+        .await;
+        assert_eq!(social_result(&mut peer, &id).await["type"], "social_ack");
+        let proposed = sync_snapshot(&mut host).await;
+        assert_eq!(proposed["revision"], revision);
+        assert_eq!(
+            proposed["events"].as_array().unwrap().last().unwrap()["source"],
+            source
+        );
+
+        let id = format!("load-{index}");
+        command(
+            &mut host,
+            &id,
+            revision,
+            json!({"type":"set_video", "source":source}),
+        )
+        .await;
+        revision += 1;
+        assert_eq!(ack(&mut host, &id).await["revision"], revision);
+        let loaded = sync_snapshot(&mut peer).await;
+        assert_eq!(loaded["source"], source);
+        assert_eq!(loaded["playback_rate"], 1.0);
+        assert_eq!(loaded["playing"], false);
+
+        if index == 0 {
+            command(
+                &mut peer,
+                "guest-rate",
+                revision,
+                json!({"type":"set_rate", "playback_rate":2.0}),
+            )
+            .await;
+            assert_eq!(
+                receive(&mut peer, |message| message["type"] == "error"
+                    && message["id"] == "guest-rate")
+                .await["code"],
+                "forbidden"
+            );
+            social(
+                &mut host,
+                "grant",
+                json!({"type":"set_moderator", "member_id":member["member_id"], "enabled":true}),
+            )
+            .await;
+            social_result(&mut host, "grant").await;
+        }
+        let id = format!("rate-{index}");
+        command(
+            &mut peer,
+            &id,
+            revision,
+            json!({"type":"set_rate", "playback_rate":1.5}),
+        )
+        .await;
+        revision += 1;
+        assert_eq!(ack(&mut peer, &id).await["revision"], revision);
+        let changed = sync_snapshot(&mut host).await;
+        assert_eq!(changed["source"], source);
+        assert_eq!(changed["playback_rate"], 1.5);
+        assert_eq!(changed["position_secs"], 0.0);
+        assert_eq!(changed["media_revision"], loaded["media_revision"]);
+    }
+    let before = sync_snapshot(&mut peer).await;
+    command(
+        &mut host,
+        "unsafe",
+        revision,
+        json!({"type":"set_video", "source":{"type":"direct", "url":"file:///video.mp4"}}),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut host, |message| message["type"] == "error"
+            && message["id"] == "unsafe")
+        .await["code"],
+        "invalid_command"
+    );
+    assert_eq!(sync_snapshot(&mut peer).await, before);
+    host.close(None).await.unwrap();
+    peer.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn social_ack_identity_and_moderation_are_independent_of_playback_over_sockets() {
     let server = TestServer::start().await;
     let created = server.rooms.create().unwrap();
@@ -668,7 +775,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
 
     assert_eq!(entry["kind"], "message");
     assert_eq!(entry["text"], "hello <b>room</b>");
-    assert_eq!(entry["video_id"], Value::Null);
+    assert_eq!(entry["source"], Value::Null);
     assert_eq!(entry["position_secs"], Value::Null);
 
     assert_eq!(chat["revision"], initial["revision"]);
@@ -696,7 +803,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     social(
         &mut guest,
         "suggest",
-        json!({ "type": "propose_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "propose_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     assert_eq!(
@@ -709,10 +816,13 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
     assert_eq!(proposal["member_id"], member_id);
     assert_eq!(proposal["name"], author["name"]);
     assert_eq!(proposal["avatar"], author["avatar"]);
-    assert_eq!(proposal["video_id"], "dQw4w9WgXcQ");
+    assert_eq!(
+        proposal["source"],
+        json!({"type":"youtube", "id":"dQw4w9WgXcQ"})
+    );
     assert_eq!(proposal["text"], Value::Null);
 
-    assert_eq!(proposed["video_id"], Value::Null);
+    assert_eq!(proposed["source"], Value::Null);
     assert_eq!(proposed["revision"], 0);
     assert_eq!(proposed["media_revision"], 0);
     assert_eq!(proposed["anchor_ms"], initial["anchor_ms"]);
@@ -744,7 +854,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
         &mut guest,
         "load",
         0,
-        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     assert_eq!(ack(&mut guest, "load").await["revision"], 1);
@@ -778,7 +888,7 @@ async fn social_ack_identity_and_moderation_are_independent_of_playback_over_soc
         &mut guest,
         "load",
         0,
-        json!({ "type": "set_video", "video_id": "dQw4w9WgXcQ" }),
+        json!({ "type": "set_video", "source":{"type":"youtube","id":"dQw4w9WgXcQ"} }),
     )
     .await;
     let error = receive(&mut guest, |message| {
@@ -845,7 +955,7 @@ async fn escaped_chat_fits_the_bounded_transport_and_social_errors_never_ack_pla
         ),
         (
             "bad-video",
-            json!({ "type": "propose_video", "video_id": "invalid" }),
+            json!({ "type": "propose_video", "source":{"type":"youtube","id":"invalid"} }),
         ),
     ] {
         social(&mut guest, id, action).await;
@@ -1045,7 +1155,7 @@ async fn malformed_and_oversized_messages_cannot_mutate_a_room() {
     let mut guest = server.connect(&created.room_id).await;
     let welcome = join(&mut guest, None).await;
     assert_eq!(welcome["snapshot"]["revision"], 0);
-    assert_eq!(welcome["snapshot"]["video_id"], Value::Null);
+    assert_eq!(welcome["snapshot"]["source"], Value::Null);
 
     guest.close(None).await.unwrap();
 }

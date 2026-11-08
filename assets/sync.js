@@ -20,6 +20,31 @@ export function parseVideoId(input) {
   return VIDEO_ID.test(id ?? '') ? id : null;
 }
 
+export function validSource(source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source) || Object.keys(source).length !== 2) return false;
+  if (source.type === 'youtube') return typeof source.id === 'string' && VIDEO_ID.test(source.id);
+  if (source.type !== 'direct' || typeof source.url !== 'string' || source.url.length > 2048
+    || !/^[\x21-\x7e]+$/.test(source.url) || /["\\<>#]/.test(source.url)) return false;
+  try {
+    const url = new URL(source.url);
+    return url.href === source.url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password
+      && /\.(mp4|webm|ogv|ogg|m4v|mov)$/i.test(url.pathname);
+  } catch { return false; }
+}
+
+export function parseMediaSource(input) {
+  const id = parseVideoId(input);
+  if (id) return { type: 'youtube', id };
+  try {
+    const source = { type: 'direct', url: new URL(String(input ?? '').trim()).href };
+    return validSource(source) ? source : null;
+  } catch { return null; }
+}
+
+export function sourceKey(source) {
+  return source?.type === 'youtube' ? source.id : source?.url ?? null;
+}
+
 export function parseRoomLink(input, origin) {
   const text = String(input ?? '').trim();
   if (/^[A-Za-z0-9_-]+$/.test(text)) return `/room/${text}`;
@@ -36,7 +61,7 @@ export function validSnapshot(s) {
     && typeof s.room_name === 'string' && s.room_name.length > 0 && s.room_name.length <= 100
     && Number.isSafeInteger(s.revision) && s.revision >= 0
     && Number.isSafeInteger(s.media_revision) && s.media_revision >= 0 && s.media_revision <= s.revision
-    && (s.video_id === null || (typeof s.video_id === 'string' && VIDEO_ID.test(s.video_id)))
+    && (s.source === null || validSource(s.source))
     && Number.isFinite(s.playback_rate) && s.playback_rate >= 0.25 && s.playback_rate <= 4
     && typeof s.playing === 'boolean' && Number.isFinite(s.position_secs) && s.position_secs >= 0
     && Number.isFinite(s.anchor_ms) && s.anchor_ms >= 0
@@ -56,10 +81,10 @@ export function validSnapshot(s) {
       && typeof entry.avatar === 'string' && /^[0-9a-f]{16}$/.test(entry.avatar)
       && ['joined', 'left', 'message', 'proposal', 'set_video', 'play', 'pause', 'seek', 'set_rate', 'role_changed'].includes(entry.kind)
       && (entry.text === null || (typeof entry.text === 'string' && entry.text.length <= 1000))
-      && (entry.video_id === null || (typeof entry.video_id === 'string' && VIDEO_ID.test(entry.video_id)))
+      && (entry.source === null || validSource(entry.source))
       && (entry.position_secs === null || (Number.isFinite(entry.position_secs) && entry.position_secs >= 0))
       && (entry.kind !== 'message' || (typeof entry.text === 'string' && entry.text.trim().length > 0))
-      && (!['proposal', 'set_video'].includes(entry.kind) || VIDEO_ID.test(entry.video_id ?? '')));
+      && (!['proposal', 'set_video'].includes(entry.kind) || validSource(entry.source)));
 }
 
 export function avatarPattern(seed) {
@@ -130,7 +155,7 @@ export function targetPosition(snapshot, serverMs, duration = Infinity) {
 
 export function playbackUpdate(previous, next) {
   const newRevision = !previous || previous.incarnation !== next.incarnation || previous.revision !== next.revision;
-  const newVideo = !previous || previous.incarnation !== next.incarnation || previous.video_id !== next.video_id;
+  const newVideo = !previous || previous.incarnation !== next.incarnation || sourceKey(previous.source) !== sourceKey(next.source);
   const resetVideo = newVideo || previous.media_revision !== next.media_revision;
   return { forceSeek: newRevision || newVideo, resetVideo };
 }

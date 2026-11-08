@@ -261,7 +261,7 @@ pub(crate) async fn home() -> Result<impl View> {
                 <meta name="theme-color" content="#1e1e2e">
                 <meta
                     name="description"
-                    content="Create a room, share a link, and watch YouTube together in sync. No accounts, just a shared moment."
+                    content="Create a room, share a link, and watch videos together in sync. No accounts, just a shared moment."
                 >
                 <title>"Sameframe — watch together"</title>
                 <link rel="stylesheet" href=(topcoat::tailwind::stylesheet!())>
@@ -546,6 +546,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                 class="room-page bg-background theater:overflow-hidden"
                 data-room-id=(if available { Some(room_id) } else { None })
                 data-sync-url=(asset!("assets/sync.js"))
+                data-players-url=(asset!("assets/players.js"))
             >
                 <a class="skip-link" href="#main">"Skip to content"</a>
                 if available {
@@ -653,16 +654,15 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                         id="video-form"
                                         class="flex items-stretch gap-2 theater:items-center"
                                     >
-                                        <label for="video-url" class="sr-only">
-                                            "YouTube link"
-                                        </label>
+                                        <label for="video-url" class="sr-only">"Video link"</label>
                                         <input
                                             id="video-url"
                                             class="min-w-0 flex-1 border-border bg-card px-3 py-2 sm:text-sm theater:h-9 theater:min-h-9 theater:py-1 theater:text-base theater:leading-tight"
                                             name="video"
                                             type="text"
                                             required=(true)
-                                            placeholder="Paste a YouTube link…"
+                                            placeholder="YouTube or direct video URL…"
+                                            maxlength="2048"
                                             autocomplete="off"
                                             autocapitalize="none"
                                             spellcheck="false"
@@ -745,7 +745,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                                 id="playback-status"
                                                 class="min-w-0 flex-1 truncate @max-[923px]/theater-footer:hidden"
                                             >
-                                                "YouTube · waiting for a video"
+                                                "Waiting for a video"
                                             </span>
                                             <div id="theater-video" class="hidden">
                                                 <button
@@ -974,7 +974,7 @@ pub(crate) async fn room(cx: &Cx) -> Result<impl View> {
                                     id="chat-help"
                                     class="px-3.5 pt-2 pb-3 text-[10px] text-muted-foreground"
                                 >
-                                    "YouTube links become video suggestions."
+                                    "Video links become suggestions."
                                 </p>
                             </aside>
                         </div>
